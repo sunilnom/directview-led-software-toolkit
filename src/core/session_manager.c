@@ -214,16 +214,19 @@ int create_st20p_tx_session(session_manager_t* manager, struct dvledtx_context* 
   ctx->crop_width    = app->session_net[session_idx].crop_w;
   ctx->crop_height   = app->session_net[session_idx].crop_h;
 
-  /* Fallback: divide the frame width evenly across all sessions */
+  /* Fallback: divide the frame width evenly across all sessions.
+   * Use scaled dimensions if scaling is configured. */
   if (ctx->crop_width == 0 || ctx->crop_height == 0) {
+    int eff_w = (app->scale_width  > 0) ? (int)app->scale_width  : (int)app->width;
+    int eff_h = (app->scale_height > 0) ? (int)app->scale_height : (int)app->height;
     int total   = app->st20p_sessions > 0 ? app->st20p_sessions : 1;
-    int strip_w = (int)app->width / total;
+    int strip_w = eff_w / total;
     ctx->crop_x_offset = session_idx * strip_w;
     ctx->crop_y_offset = 0;
     ctx->crop_width  = (session_idx == total - 1)
-                       ? ((int)app->width - ctx->crop_x_offset)
+                       ? (eff_w - ctx->crop_x_offset)
                        : strip_w;
-    ctx->crop_height = (int)app->height;
+    ctx->crop_height = eff_h;
   }
   LOG_INFO("ST20P TX session %d: crop rect x=%d y=%d w=%d h=%d",
            session_idx, ctx->crop_x_offset, ctx->crop_y_offset,

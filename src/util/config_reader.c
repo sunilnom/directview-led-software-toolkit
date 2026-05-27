@@ -261,6 +261,8 @@ int parse_tx_config(const char* config_file, struct dvledtx_config* config) {
         int v;
         v = extract_json_int(video_obj, video_end, "width");  if (v > 0) config->width  = v;
         v = extract_json_int(video_obj, video_end, "height"); if (v > 0) config->height = v;
+        v = extract_json_int(video_obj, video_end, "scale_width");  if (v > 0) config->scale_width  = v;
+        v = extract_json_int(video_obj, video_end, "scale_height"); if (v > 0) config->scale_height = v;
         v = extract_json_int(video_obj, video_end, "fps");    if (v > 0) config->fps    = v;
         extract_json_string(video_obj, video_end, "fmt",    config->fmt,    sizeof(config->fmt));
         extract_json_string(video_obj, video_end, "tx_url", config->tx_url, sizeof(config->tx_url));
@@ -427,6 +429,23 @@ int validate_tx_config(const struct dvledtx_config* config) {
         return -1;
     }
 
+    /* Scale dimensions validation (optional — 0 means no scaling) */
+    if (config->scale_width != 0 || config->scale_height != 0) {
+        if (config->scale_width == 0 || config->scale_height == 0) {
+            LOG_ERROR("scale_width and scale_height must both be set or both be omitted");
+            return -1;
+        }
+        if (config->scale_width > 3840 || config->scale_height > 2160) {
+            LOG_ERROR("scale resolution %dx%d exceeds maximum 3840x2160",
+                   config->scale_width, config->scale_height);
+            return -1;
+        }
+        if (config->scale_width % 2 != 0) {
+            LOG_ERROR("scale_width %d must be even for YUV formats", config->scale_width);
+            return -1;
+        }
+    }
+
     /* FPS validation */
     if (config->fps != 25 && config->fps != 30 &&
         config->fps != 50 && config->fps != 60) {
@@ -488,23 +507,25 @@ int validate_tx_config(const struct dvledtx_config* config) {
             return -1;
         }
 
-        /* Crop bounds: must fit within the source video */
+        /* Crop bounds: must fit within the output frame (scaled if scaling is active) */
+        uint32_t effective_w = config->scale_width  > 0 ? config->scale_width  : config->width;
+        uint32_t effective_h = config->scale_height > 0 ? config->scale_height : config->height;
         if (s->crop_x < 0 || s->crop_y < 0 || s->crop_w <= 0 || s->crop_h <= 0) {
             LOG_ERROR("session %d: crop values must be positive "
                    "(x=%d y=%d w=%d h=%d)", i, s->crop_x, s->crop_y,
                    s->crop_w, s->crop_h);
             return -1;
         }
-        if ((uint32_t)s->crop_x + (uint32_t)s->crop_w > config->width) {
-            LOG_ERROR("session %d: crop x=%d + w=%d = %u exceeds video width %u",
+        if ((uint32_t)s->crop_x + (uint32_t)s->crop_w > effective_w) {
+            LOG_ERROR("session %d: crop x=%d + w=%d = %u exceeds frame width %u",
                    i, s->crop_x, s->crop_w,
-                   (uint32_t)s->crop_x + (uint32_t)s->crop_w, config->width);
+                   (uint32_t)s->crop_x + (uint32_t)s->crop_w, effective_w);
             return -1;
         }
-        if ((uint32_t)s->crop_y + (uint32_t)s->crop_h > config->height) {
-            LOG_ERROR("session %d: crop y=%d + h=%d = %u exceeds video height %u",
+        if ((uint32_t)s->crop_y + (uint32_t)s->crop_h > effective_h) {
+            LOG_ERROR("session %d: crop y=%d + h=%d = %u exceeds frame height %u",
                    i, s->crop_y, s->crop_h,
-                   (uint32_t)s->crop_y + (uint32_t)s->crop_h, config->height);
+                   (uint32_t)s->crop_y + (uint32_t)s->crop_h, effective_h);
             return -1;
         }
         if (s->crop_w % 2 != 0) {
@@ -590,6 +611,8 @@ int load_and_apply_config(struct dvledtx_context* app, const char* config_file) 
     /* Video */
     app->width  = config.width;
     app->height = config.height;
+    app->scale_width  = config.scale_width;
+    app->scale_height = config.scale_height;
     app->fps    = config.fps;
 
     if (strcmp(config.fmt, "yuv422p10le") == 0)       app->fmt = AV_PIX_FMT_YUV422P10LE;
@@ -641,6 +664,9 @@ int load_and_apply_config(struct dvledtx_context* app, const char* config_file) 
     LOG_INFO("Video: %dx%d %dfps %s  tx_url=%s",
            config.width, config.height, config.fps, config.fmt,
            config.tx_url[0] ? config.tx_url : "<none>");
+    if (config.scale_width > 0 && config.scale_height > 0)
+        LOG_INFO("  Scaling: %dx%d -> %dx%d",
+               config.width, config.height, config.scale_width, config.scale_height);
     for (int i = 0; i < config.session_count; i++)
         LOG_INFO("  Session %d: udp_port=%u pt=%u crop=[%d,%d %dx%d]", i,
                config.sessions[i].udp_port, config.sessions[i].payload_type,
