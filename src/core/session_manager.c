@@ -269,10 +269,12 @@ int create_st20p_tx_session(session_manager_t* manager, struct dvledtx_context* 
 int session_manager_init(session_manager_t* manager, struct dvledtx_context* app) {
   memset(manager, 0, sizeof(*manager));
 
-#ifdef ENABLE_MTL_TX
+  /* Always pre-initialise MTL with all NIC ports before opening any session.
+   * In the FFmpeg avdevice path (mtl_st20p), DPDK EAL would otherwise be
+   * initialised by the first avformat_write_header() with only one port,
+   * causing "mt_port_by_name … is not valid" for every subsequent NIC. */
   if (mtl_tx_init(manager, app) < 0)
     return -1;
-#endif /* ENABLE_MTL_TX */
 
   /* Use shared decoder only when > 1 session and source needs decoding */
   bool use_shared = (app->st20p_sessions > 1 &&
@@ -459,9 +461,7 @@ void session_manager_cleanup(session_manager_t* manager) {
     manager->shared_dec = NULL;
   }
 
-#ifdef ENABLE_MTL_TX
   mtl_tx_uninit(manager);
-#endif
 
   manager->st20p_count = 0;
 }

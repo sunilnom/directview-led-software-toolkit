@@ -22,16 +22,20 @@
  *   mtl_tx_send_raw_yuv()     — get MTL frame, memcpy raw buffer, put frame
  */
 
-#ifdef ENABLE_MTL_TX
-
+/* mtl_tx_init / mtl_tx_uninit are compiled unconditionally so that the
+ * FFmpeg avdevice path can also pre-initialise DPDK EAL with ALL NIC ports
+ * before opening any mtl_st20p session (fixes multi-NIC support).
+ * All other functions remain guarded by ENABLE_MTL_TX. */
 #include "mtl/mtl_tx.h"
 #include "app_context.h"
 #include "core/session_manager.h"
 #include "util/logger.h"
-#include <libavutil/pixdesc.h>
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+
+#ifdef ENABLE_MTL_TX
+#include <libavutil/pixdesc.h>
 
 /* =========================================================================
  * get_input_format / get_transport_format
@@ -181,8 +185,10 @@ void mtl_copy_crop_to_frame(struct st_frame* dst, const AVFrame* src,
   }
 }
 
+#endif /* ENABLE_MTL_TX — mtl_copy_crop_to_frame and format helpers */
+
 /* =========================================================================
- * mtl_tx_init / mtl_tx_uninit
+ * mtl_tx_init / mtl_tx_uninit — compiled unconditionally (FFmpeg + direct)
  * =========================================================================
  *
  * mtl_tx_init() — initialise the MTL library using parameters from app.
@@ -196,26 +202,37 @@ int mtl_tx_init(session_manager_t* manager, struct dvledtx_context* app) {
   struct mtl_init_params mtl_params;
   memset(&mtl_params, 0, sizeof(mtl_params));
 
-  mtl_params.flags   = MTL_FLAG_BIND_NUMA | MTL_FLAG_DEV_AUTO_START_STOP;
-  mtl_params.num_ports = 1;
-  snprintf(mtl_params.port[MTL_PORT_P], MTL_PORT_MAX_LEN, "%s", app->port);
-  memcpy(mtl_params.sip_addr[MTL_PORT_P], app->sip_addr, MTL_IP_ADDR_LEN);
-  mtl_params.pmd[MTL_PORT_P] = mtl_pmd_by_port_name(app->port);
+  mtl_params.flags     = MTL_FLAG_BIND_NUMA | MTL_FLAG_DEV_AUTO_START_STOP;
+  mtl_params.num_ports = app->nic_count;
 
-  uint16_t tx_queues = (uint16_t)(app->st20p_sessions + 2);
-  uint16_t rx_queues = 2;
-  mtl_params.tx_queues_cnt[MTL_PORT_P] = tx_queues;
-  mtl_params.rx_queues_cnt[MTL_PORT_P] = rx_queues;
+  /* Count sessions assigned to each NIC for queue allocation */
+  int sessions_per_nic[MAX_INTERFACES] = {0};
+  for (int i = 0; i < app->st20p_sessions; i++) {
+    int ni = app->session_net[i].nic_index;
+    if (ni >= 0 && ni < app->nic_count)
+      sessions_per_nic[ni]++;
+  }
 
-  LOG_INFO("MTL init: port=%s pmd=%d tx_queues=%d rx_queues=%d",
-           app->port, mtl_params.pmd[MTL_PORT_P], tx_queues, rx_queues);
+  for (int ni = 0; ni < app->nic_count; ni++) {
+    snprintf(mtl_params.port[ni], MTL_PORT_MAX_LEN, "%s", app->port[ni]);
+    memcpy(mtl_params.sip_addr[ni], app->sip_addr[ni], MTL_IP_ADDR_LEN);
+    mtl_params.pmd[ni] = mtl_pmd_by_port_name(app->port[ni]);
+
+    uint16_t tx_queues = (uint16_t)(sessions_per_nic[ni] + 2);
+    uint16_t rx_queues = 2;
+    mtl_params.tx_queues_cnt[ni] = tx_queues;
+    mtl_params.rx_queues_cnt[ni] = rx_queues;
+
+    LOG_INFO("MTL init: port[%d]=%s pmd=%d tx_queues=%d rx_queues=%d",
+             ni, app->port[ni], mtl_params.pmd[ni], tx_queues, rx_queues);
+  }
 
   manager->mtl = mtl_init(&mtl_params);
   if (!manager->mtl) {
     LOG_ERROR("Failed to initialise MTL library");
     return -1;
   }
-  LOG_INFO("MTL library initialised successfully");
+  LOG_INFO("MTL library initialised successfully (%d port(s))", app->nic_count);
   return 0;
 }
 
@@ -225,6 +242,11 @@ void mtl_tx_uninit(session_manager_t* manager) {
     manager->mtl = NULL;
   }
 }
+
+/* =========================================================================
+ * Everything below requires the direct MTL TX path (ENABLE_MTL_TX).
+ * ========================================================================= */
+#ifdef ENABLE_MTL_TX
 
 /* =========================================================================
  * mtl_tx_session_create / mtl_tx_session_free
@@ -244,8 +266,9 @@ int mtl_tx_session_create(session_manager_t* manager, struct st20p_tx_ctx* ctx,
   ops.priv = ctx;
 
   ops.port.num_port = 1;
-  memcpy(ops.port.dip_addr[MTL_SESSION_PORT_P], app->dip_addr, MTL_IP_ADDR_LEN);
-  snprintf(ops.port.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s", app->port);
+  int nic = app->session_net[session_idx].nic_index;
+  memcpy(ops.port.dip_addr[MTL_SESSION_PORT_P], app->dip_addr[nic], MTL_IP_ADDR_LEN);
+  snprintf(ops.port.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s", app->port[nic]);
 
   int udp_port = app->session_net[session_idx].udp_port;
   if (udp_port == 0) udp_port = (int)app->udp_port + (session_idx * 2);

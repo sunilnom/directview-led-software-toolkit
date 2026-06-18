@@ -16,15 +16,13 @@ libswscale_dep  = dependency('libswscale',  required: true)
 # TX path selection — see meson_options.txt for details.
 enable_mtl_tx = get_option('enable_mtl_tx')
 
-mtl_dep      = []
+mtl_dep      = dependency('mtl', required: true)
 avdevice_dep = []
 c_args       = ['-DALLOW_EXPERIMENTAL_API', '-D_FORTIFY_SOURCE=2', '-O2']
-mtl_inc_args = []
+mtl_inc_args = ['-I/usr/local/include/mtl']
 
 if enable_mtl_tx
-  mtl_dep      = dependency('mtl', required: true)
   c_args      += ['-DENABLE_MTL_TX']
-  mtl_inc_args = ['-I/usr/local/include/mtl']
 else
   avdevice_dep = dependency('libavdevice', required: true)
 endif

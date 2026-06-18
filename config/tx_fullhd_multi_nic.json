@@ -1,0 +1,43 @@
+{
+  "log_file": "dvledtx.log",
+  "interfaces": [
+    {
+      "name": "0000:04:00.0",
+      "sip":  "192.168.40.29",
+      "dip":  "239.168.85.20"
+    },
+    {
+      "name": "0000:06:00.0",
+      "sip":  "192.168.50.29",
+      "dip":  "239.168.85.21"
+    }
+  ],
+  "video": {
+    "width":  1920,
+    "height": 1080,
+    "tx_url": "bbb_sunflower_1080p_30fps_normal.mp4"
+  },
+  "tx_video": {
+    "scale_width":  1920,
+    "scale_height": 1080,
+    "fps":    30,
+    "fmt":    "yuv422p10le"
+  },
+  "tx_sessions": [
+    {
+      "nic_index": 0,
+      "udp_port":  20000,
+      "crop": { "x": 0,    "y": 0, "w": 640, "h": 1080 }
+    },
+    {
+      "nic_index": 0,
+      "udp_port":  20002,
+      "crop": { "x": 640,  "y": 0, "w": 640, "h": 1080 }
+    },
+    {
+      "nic_index": 1,
+      "udp_port":  20004,
+      "crop": { "x": 1280, "y": 0, "w": 640, "h": 1080 }
+    }
+  ]
+}
