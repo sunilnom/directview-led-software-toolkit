@@ -338,8 +338,16 @@ int mtl_tx_send_yuv_frame(struct st20p_tx_ctx* ctx, const AVFrame* src,
   mtl_copy_crop_to_frame(frame, src, crop_x, crop_y, crop_w, crop_h,
                          ctx->app->fmt);
 
+  /* Use the shared frame counter for RTP timestamp so ALL sessions stamp the
+   * same video frame identically — prevents inter-session clock drift.
+   * Per-session frames_sent diverges under thread scheduling jitter.
+   * frame_counter is incremented by the decode thread after all TX threads
+   * have consumed the frame (post barrier_copied), so it is stable here. */
+  uint32_t frame_num = ctx->shared_dec
+                       ? (uint32_t)atomic_load(&ctx->shared_dec->frame_counter)
+                       : ctx->frames_sent;
   frame->tfmt      = ST10_TIMESTAMP_FMT_MEDIA_CLK;
-  frame->timestamp = ctx->frames_sent * 90000 / (uint32_t)ctx->app->fps;
+  frame->timestamp = frame_num * 90000 / (uint32_t)ctx->app->fps;
 
   int ret = st20p_tx_put_frame(ctx->handle, frame);
   if (ret < 0) {
@@ -380,6 +388,8 @@ int mtl_tx_send_raw_yuv(struct st20p_tx_ctx* ctx) {
     memcpy(frame->addr[0], ctx->source_buffer + ctx->current_pos, frame_bytes);
   ctx->current_pos += frame_bytes;
 
+  /* raw YUV path is always single-session (no shared_dec); per-session
+   * frames_sent is the correct counter here. */
   frame->tfmt      = ST10_TIMESTAMP_FMT_MEDIA_CLK;
   frame->timestamp = ctx->frames_sent * 90000 / (uint32_t)ctx->app->fps;
 
