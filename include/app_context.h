@@ -9,7 +9,8 @@
 #include <arpa/inet.h>
 #include <libavutil/pixfmt.h>
 
-#define MAX_TX_SESSIONS (8)
+#define MAX_TX_SESSIONS  (8)
+#define MAX_INTERFACES   (8)
 
 /* Per-session network and crop parameters (populated from JSON tx_sessions[]) */
 struct tx_session_net {
@@ -19,18 +20,21 @@ struct tx_session_net {
   int      crop_y;
   int      crop_w;
   int      crop_h;
+  int      nic_index;   /* which NIC this session uses (index into port[]/sip_addr[]/dip_addr[]) */
 };
 
 /* Application context for TX sessions */
 struct dvledtx_context {
-  /* Configuration */
-  char port[64];        /* DPDK NIC PCI BDF/address for MTL output (e.g. 0000:af:00.0), not a Linux interface name */
+  /* NIC configuration — arrays indexed [0..nic_count-1] */
+  int     nic_count;                                       /* number of active NICs */
+  char    port[MAX_INTERFACES][64];                        /* DPDK NIC PCI BDF per NIC */
+  char    sip_addr_str[MAX_INTERFACES][INET_ADDRSTRLEN];   /* source IP string per NIC */
+  uint8_t sip_addr[MAX_INTERFACES][4];                     /* source IP binary per NIC */
+  char    dip_addr_str[MAX_INTERFACES][INET_ADDRSTRLEN];   /* destination IP string per NIC */
+  uint8_t dip_addr[MAX_INTERFACES][4];                     /* destination IP binary per NIC */
+
   char tx_url[256];
   char config_file[256];
-  char sip_addr_str[INET_ADDRSTRLEN];
-  uint8_t sip_addr[4];
-  char dip_addr_str[INET_ADDRSTRLEN];
-  uint8_t dip_addr[4];
   uint16_t udp_port;
   uint8_t  payload_type;  /* RTP dynamic payload type (default: 96) */
 

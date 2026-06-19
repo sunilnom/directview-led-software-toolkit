@@ -60,9 +60,10 @@ static char *write_tmpfile(const char *content)
 static void fill_valid_config(struct dvledtx_config *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
-    strncpy(cfg->interface_name, "0000:06:00.0",   sizeof(cfg->interface_name) - 1);
-    strncpy(cfg->interface_sip,  "192.168.50.29",  sizeof(cfg->interface_sip)  - 1);
-    strncpy(cfg->interface_dip,  "239.168.85.20",  sizeof(cfg->interface_dip)  - 1);
+    cfg->nic_count = 1;
+    strncpy(cfg->interface_name[0], "0000:06:00.0",   sizeof(cfg->interface_name[0]) - 1);
+    strncpy(cfg->interface_sip[0],  "192.168.50.29",  sizeof(cfg->interface_sip[0])  - 1);
+    strncpy(cfg->interface_dip[0],  "239.168.85.20",  sizeof(cfg->interface_dip[0])  - 1);
     cfg->width  = 1920;
     cfg->height = 1080;
     cfg->fps    = 30;
@@ -119,9 +120,9 @@ static void test_parse_3sessions_interface_fields(void **state)
     (void)state;
     struct dvledtx_config cfg;
     assert_int_equal(parse_tx_config(FIXTURE_3SESSIONS, &cfg), 0);
-    assert_string_equal(cfg.interface_name, "0000:06:00.0");
-    assert_string_equal(cfg.interface_sip,  "192.168.50.29");
-    assert_string_equal(cfg.interface_dip,  "239.168.85.20");
+    assert_string_equal(cfg.interface_name[0], "0000:06:00.0");
+    assert_string_equal(cfg.interface_sip[0],  "192.168.50.29");
+    assert_string_equal(cfg.interface_dip[0],  "239.168.85.20");
 }
 
 static void test_parse_3sessions_video_params(void **state)
@@ -262,7 +263,7 @@ static void test_validate_missing_interface_name_fails(void **state)
     (void)state;
     struct dvledtx_config cfg;
     fill_valid_config(&cfg);
-    cfg.interface_name[0] = '\0';
+    cfg.interface_name[0][0] = '\0';
     assert_int_equal(validate_tx_config(&cfg), -1);
 }
 
@@ -271,7 +272,7 @@ static void test_validate_missing_dip_fails(void **state)
     (void)state;
     struct dvledtx_config cfg;
     fill_valid_config(&cfg);
-    cfg.interface_dip[0] = '\0';
+    cfg.interface_dip[0][0] = '\0';
     assert_int_equal(validate_tx_config(&cfg), -1);
 }
 
@@ -280,7 +281,7 @@ static void test_validate_invalid_sip_fails(void **state)
     (void)state;
     struct dvledtx_config cfg;
     fill_valid_config(&cfg);
-    strncpy(cfg.interface_sip, "not.an.ip.address", sizeof(cfg.interface_sip) - 1);
+    strncpy(cfg.interface_sip[0], "not.an.ip.address", sizeof(cfg.interface_sip[0]) - 1);
     assert_int_equal(validate_tx_config(&cfg), -1);
 }
 
@@ -289,7 +290,7 @@ static void test_validate_invalid_dip_fails(void **state)
     (void)state;
     struct dvledtx_config cfg;
     fill_valid_config(&cfg);
-    strncpy(cfg.interface_dip, "999.999.999.999", sizeof(cfg.interface_dip) - 1);
+    strncpy(cfg.interface_dip[0], "999.999.999.999", sizeof(cfg.interface_dip[0]) - 1);
     assert_int_equal(validate_tx_config(&cfg), -1);
 }
 
@@ -452,9 +453,10 @@ static void test_validate_3sessions_tiled_layout_passes(void **state)
     /* Mirrors tx_fullhd_multi_session.json: three 640-wide horizontal tiles */
     struct dvledtx_config cfg;
     memset(&cfg, 0, sizeof(cfg));
-    strncpy(cfg.interface_name, "0000:06:00.0",   sizeof(cfg.interface_name) - 1);
-    strncpy(cfg.interface_sip,  "192.168.50.29",  sizeof(cfg.interface_sip)  - 1);
-    strncpy(cfg.interface_dip,  "239.168.85.20",  sizeof(cfg.interface_dip)  - 1);
+    cfg.nic_count = 1;
+    strncpy(cfg.interface_name[0], "0000:06:00.0",   sizeof(cfg.interface_name[0]) - 1);
+    strncpy(cfg.interface_sip[0],  "192.168.50.29",  sizeof(cfg.interface_sip[0])  - 1);
+    strncpy(cfg.interface_dip[0],  "239.168.85.20",  sizeof(cfg.interface_dip[0])  - 1);
     cfg.width  = 1920;
     cfg.height = 1080;
     cfg.fps    = 30;
@@ -770,9 +772,10 @@ static void test_validate_duplicate_udp_ports_fails(void **state)
     (void)state;
     struct dvledtx_config cfg;
     memset(&cfg, 0, sizeof(cfg));
-    strncpy(cfg.interface_name, "0000:06:00.0", sizeof(cfg.interface_name) - 1);
-    strncpy(cfg.interface_sip,  "192.168.1.1",  sizeof(cfg.interface_sip)  - 1);
-    strncpy(cfg.interface_dip,  "239.0.0.1",    sizeof(cfg.interface_dip)  - 1);
+    cfg.nic_count = 1;
+    strncpy(cfg.interface_name[0], "0000:06:00.0", sizeof(cfg.interface_name[0]) - 1);
+    strncpy(cfg.interface_sip[0],  "192.168.1.1",  sizeof(cfg.interface_sip[0])  - 1);
+    strncpy(cfg.interface_dip[0],  "239.0.0.1",    sizeof(cfg.interface_dip[0])  - 1);
     cfg.width = 1920; cfg.height = 1080; cfg.fps = 25;
     strncpy(cfg.fmt, "yuv422p10le", sizeof(cfg.fmt) - 1);
     cfg.session_count = 2;
@@ -829,7 +832,7 @@ static void test_validate_non_multicast_dip_fails(void **state)
     (void)state;
     struct dvledtx_config cfg;
     fill_valid_config(&cfg);
-    strncpy(cfg.interface_dip, "192.168.1.100", sizeof(cfg.interface_dip) - 1);
+    strncpy(cfg.interface_dip[0], "192.168.1.100", sizeof(cfg.interface_dip[0]) - 1);
     assert_int_equal(validate_tx_config(&cfg), -1);
 }
 
@@ -839,7 +842,7 @@ static void test_validate_invalid_bdf_format_fails(void **state)
     (void)state;
     struct dvledtx_config cfg;
     fill_valid_config(&cfg);
-    strncpy(cfg.interface_name, "eth0", sizeof(cfg.interface_name) - 1);
+    strncpy(cfg.interface_name[0], "eth0", sizeof(cfg.interface_name[0]) - 1);
     assert_int_equal(validate_tx_config(&cfg), -1);
 }
 
@@ -848,7 +851,7 @@ static void test_validate_valid_bdf_passes(void **state)
     (void)state;
     struct dvledtx_config cfg;
     fill_valid_config(&cfg);
-    strncpy(cfg.interface_name, "0000:af:00.1", sizeof(cfg.interface_name) - 1);
+    strncpy(cfg.interface_name[0], "0000:af:00.1", sizeof(cfg.interface_name[0]) - 1);
     assert_int_equal(validate_tx_config(&cfg), 0);
 }
 
@@ -1015,7 +1018,7 @@ static void test_validate_low_multicast_dip_passes_with_warning(void **state)
     (void)state;
     struct dvledtx_config cfg;
     fill_valid_config(&cfg);
-    strncpy(cfg.interface_dip, "224.0.0.50", sizeof(cfg.interface_dip) - 1);
+    strncpy(cfg.interface_dip[0], "224.0.0.50", sizeof(cfg.interface_dip[0]) - 1);
     /* In multicast range but outside the 239.0.0.0/8 administratively-scoped
      * range — must still validate (a warning is logged). */
     assert_int_equal(validate_tx_config(&cfg), 0);
@@ -1027,7 +1030,7 @@ static void test_validate_above_multicast_dip_fails(void **state)
     (void)state;
     struct dvledtx_config cfg;
     fill_valid_config(&cfg);
-    strncpy(cfg.interface_dip, "240.0.0.1", sizeof(cfg.interface_dip) - 1);
+    strncpy(cfg.interface_dip[0], "240.0.0.1", sizeof(cfg.interface_dip[0]) - 1);
     assert_int_equal(validate_tx_config(&cfg), -1);
 }
 
@@ -1058,7 +1061,7 @@ static void test_validate_short_bdf_format_fails(void **state)
     struct dvledtx_config cfg;
     fill_valid_config(&cfg);
     /* Missing leading "00" in domain — DDD:DD:DD.D instead of DDDD:DD:DD.D */
-    strncpy(cfg.interface_name, "000:06:00.0", sizeof(cfg.interface_name) - 1);
+    strncpy(cfg.interface_name[0], "000:06:00.0", sizeof(cfg.interface_name[0]) - 1);
     assert_int_equal(validate_tx_config(&cfg), -1);
 }
 
@@ -1068,7 +1071,7 @@ static void test_validate_nonhex_bdf_format_fails(void **state)
     (void)state;
     struct dvledtx_config cfg;
     fill_valid_config(&cfg);
-    strncpy(cfg.interface_name, "ZZZZ:06:00.0", sizeof(cfg.interface_name) - 1);
+    strncpy(cfg.interface_name[0], "ZZZZ:06:00.0", sizeof(cfg.interface_name[0]) - 1);
     assert_int_equal(validate_tx_config(&cfg), -1);
 }
 
@@ -1168,7 +1171,7 @@ static void test_load_and_apply_config_populates_app_context(void **state)
     int ret = load_and_apply_config(&app, path);
     unlink(path); free(path);
     assert_int_equal(ret, 0);
-    assert_string_equal(app.port, "0000:06:00.0");
+    assert_string_equal(app.port[0], "0000:06:00.0");
     assert_int_equal((int)app.width,  1920);
     assert_int_equal((int)app.height, 1080);
     assert_int_equal(app.fps, 30);

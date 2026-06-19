@@ -108,8 +108,9 @@ int load_and_apply_config(struct dvledtx_context* app, const char* f)
 {
     (void)f;
     if (stub_load_and_apply_config_ret == 0 && stub_load_config_set_ips) {
-        strncpy(app->sip_addr_str, "192.168.50.29", sizeof(app->sip_addr_str) - 1);
-        strncpy(app->dip_addr_str, "239.168.85.20", sizeof(app->dip_addr_str) - 1);
+        strncpy(app->sip_addr_str[0], "192.168.50.29", sizeof(app->sip_addr_str[0]) - 1);
+        strncpy(app->dip_addr_str[0], "239.168.85.20", sizeof(app->dip_addr_str[0]) - 1);
+        app->nic_count = 1;
         app->test_time_s = stub_load_config_test_time_s;
         app->exit = stub_load_config_set_exit;
     }
@@ -122,16 +123,16 @@ int load_and_apply_config(struct dvledtx_context* app, const char* f)
  * stubs above.  Provide the real implementation directly here so that the
  * existing resolve_ip_addrs test cases continue to work correctly. */
 int resolve_ip_addrs(struct dvledtx_context* ctx) {
-    if (ctx->sip_addr_str[0] != '\0') {
-        if (inet_pton(AF_INET, ctx->sip_addr_str, ctx->sip_addr) != 1) {
-            LOG_ERROR("Invalid source IP address %s", ctx->sip_addr_str);
+    if (ctx->sip_addr_str[0][0] != '\0') {
+        if (inet_pton(AF_INET, ctx->sip_addr_str[0], ctx->sip_addr[0]) != 1) {
+            LOG_ERROR("Invalid source IP address %s", ctx->sip_addr_str[0]);
             return -1;
         }
     } else {
         LOG_INFO("No source IP provided, DHCP mode");
     }
-    if (inet_pton(AF_INET, ctx->dip_addr_str, ctx->dip_addr) != 1) {
-        LOG_ERROR("Invalid destination IP address %s", ctx->dip_addr_str);
+    if (inet_pton(AF_INET, ctx->dip_addr_str[0], ctx->dip_addr[0]) != 1) {
+        LOG_ERROR("Invalid destination IP address %s", ctx->dip_addr_str[0]);
         return -1;
     }
     return 0;
@@ -236,12 +237,13 @@ static void test_resolve_ip_valid_sip_and_dip(void **state)
     (void)state;
     struct dvledtx_context ctx;
     memset(&ctx, 0, sizeof(ctx));
-    strncpy(ctx.sip_addr_str, "192.168.50.29", sizeof(ctx.sip_addr_str) - 1);
-    strncpy(ctx.dip_addr_str, "239.168.85.20", sizeof(ctx.dip_addr_str) - 1);
+    ctx.nic_count = 1;
+    strncpy(ctx.sip_addr_str[0], "192.168.50.29", sizeof(ctx.sip_addr_str[0]) - 1);
+    strncpy(ctx.dip_addr_str[0], "239.168.85.20", sizeof(ctx.dip_addr_str[0]) - 1);
     assert_int_equal(resolve_ip_addrs(&ctx), 0);
     /* Verify binary addresses were written */
-    assert_int_equal(ctx.sip_addr[0], 192);
-    assert_int_equal(ctx.dip_addr[0], 239);
+    assert_int_equal(ctx.sip_addr[0][0], 192);
+    assert_int_equal(ctx.dip_addr[0][0], 239);
 }
 
 static void test_resolve_ip_empty_sip_dhcp_mode(void **state)
@@ -249,10 +251,11 @@ static void test_resolve_ip_empty_sip_dhcp_mode(void **state)
     (void)state;
     struct dvledtx_context ctx;
     memset(&ctx, 0, sizeof(ctx));
+    ctx.nic_count = 1;
     /* sip_addr_str is empty → DHCP mode branch; only dip is resolved */
-    strncpy(ctx.dip_addr_str, "239.168.85.20", sizeof(ctx.dip_addr_str) - 1);
+    strncpy(ctx.dip_addr_str[0], "239.168.85.20", sizeof(ctx.dip_addr_str[0]) - 1);
     assert_int_equal(resolve_ip_addrs(&ctx), 0);
-    assert_int_equal(ctx.dip_addr[0], 239);
+    assert_int_equal(ctx.dip_addr[0][0], 239);
 }
 
 static void test_resolve_ip_invalid_sip_fails(void **state)
@@ -260,8 +263,9 @@ static void test_resolve_ip_invalid_sip_fails(void **state)
     (void)state;
     struct dvledtx_context ctx;
     memset(&ctx, 0, sizeof(ctx));
-    strncpy(ctx.sip_addr_str, "not.an.ip.addr", sizeof(ctx.sip_addr_str) - 1);
-    strncpy(ctx.dip_addr_str, "239.168.85.20",  sizeof(ctx.dip_addr_str) - 1);
+    ctx.nic_count = 1;
+    strncpy(ctx.sip_addr_str[0], "not.an.ip.addr", sizeof(ctx.sip_addr_str[0]) - 1);
+    strncpy(ctx.dip_addr_str[0], "239.168.85.20",  sizeof(ctx.dip_addr_str[0]) - 1);
     assert_int_equal(resolve_ip_addrs(&ctx), -1);
 }
 
@@ -270,7 +274,8 @@ static void test_resolve_ip_invalid_dip_fails(void **state)
     (void)state;
     struct dvledtx_context ctx;
     memset(&ctx, 0, sizeof(ctx));
-    strncpy(ctx.dip_addr_str, "999.999.999.999", sizeof(ctx.dip_addr_str));
+    ctx.nic_count = 1;
+    strncpy(ctx.dip_addr_str[0], "999.999.999.999", sizeof(ctx.dip_addr_str[0]));
     assert_int_equal(resolve_ip_addrs(&ctx), -1);
 }
 

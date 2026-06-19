@@ -310,7 +310,7 @@ int main(int argc, char** argv) {
   }
 
   LOG_INFO("dvledtx started successfully");
-  LOG_INFO("Port: %s, DIP: %s, UDP: %d", app.port, app.dip_addr_str, app.udp_port);
+  LOG_INFO("Port[0]: %s, DIP[0]: %s, UDP: %d", app.port[0], app.dip_addr_str[0], app.udp_port);
   LOG_INFO("Video: %dx%d, ST20P sessions: %d",
          app.width, app.height, app.st20p_sessions);
 

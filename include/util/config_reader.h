@@ -18,14 +18,16 @@ struct tx_session_config {
   int      crop_y;
   int      crop_w;
   int      crop_h;
+  int      nic_index;  /* which NIC (index into interface arrays); default 0 */
 };
 
 /* Full application configuration parsed from JSON */
 struct dvledtx_config {
-  /* interfaces[0] */
-  char interface_name[64];  /* PCI address, e.g. "0000:02:00.0" */
-  char interface_sip[32];   /* source IP, e.g. "192.168.50.29" */
-  char interface_dip[32];   /* destination IP, e.g. "239.168.85.20" */
+  /* interfaces array — up to MAX_INTERFACES entries */
+  int  nic_count;                              /* number of interfaces parsed */
+  char interface_name[MAX_INTERFACES][64];     /* PCI address per NIC */
+  char interface_sip[MAX_INTERFACES][32];      /* source IP per NIC */
+  char interface_dip[MAX_INTERFACES][32];      /* destination multicast IP per NIC */
 
   /* video block */
   uint32_t width;

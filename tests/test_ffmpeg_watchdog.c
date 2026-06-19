@@ -177,9 +177,10 @@ fail_enc:
 static void fill_app_16x16(struct dvledtx_context* app, int sessions)
 {
     memset(app, 0, sizeof(*app));
-    strncpy(app->port,         "0000:06:00.0",  sizeof(app->port) - 1);
-    strncpy(app->sip_addr_str, "192.168.50.29", sizeof(app->sip_addr_str) - 1);
-    strncpy(app->dip_addr_str, "239.168.85.20", sizeof(app->dip_addr_str) - 1);
+    strncpy(app->port[0],         "0000:06:00.0",  sizeof(app->port[0]) - 1);
+    strncpy(app->sip_addr_str[0], "192.168.50.29", sizeof(app->sip_addr_str[0]) - 1);
+    strncpy(app->dip_addr_str[0], "239.168.85.20", sizeof(app->dip_addr_str[0]) - 1);
+    app->nic_count = 1;
     app->width          = 16;
     app->height         = 16;
     app->fps            = 25;

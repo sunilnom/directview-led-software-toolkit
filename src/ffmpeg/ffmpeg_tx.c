@@ -86,11 +86,11 @@ int open_ffmpeg_tx(struct st20p_tx_ctx* ctx) {
   int payload_type = ctx->app->session_net[ctx->idx].payload_type;
   if (payload_type == 0) payload_type = ctx->app->payload_type;
 
-  ret = av_opt_set    (ctx->out_fmt_ctx->priv_data, "p_port",       ctx->app->port,         0);
+  ret = av_opt_set    (ctx->out_fmt_ctx->priv_data, "p_port",       ctx->app->port[ctx->app->session_net[ctx->idx].nic_index],         0);
   if (ret < 0) LOG_WARN("ST20P TX(%d): av_opt_set p_port failed (ret=%d)", ctx->idx, ret);
-  ret = av_opt_set    (ctx->out_fmt_ctx->priv_data, "p_sip",        ctx->app->sip_addr_str, 0);
+  ret = av_opt_set    (ctx->out_fmt_ctx->priv_data, "p_sip",        ctx->app->sip_addr_str[ctx->app->session_net[ctx->idx].nic_index], 0);
   if (ret < 0) LOG_WARN("ST20P TX(%d): av_opt_set p_sip failed (ret=%d)", ctx->idx, ret);
-  ret = av_opt_set    (ctx->out_fmt_ctx->priv_data, "p_tx_ip",      ctx->app->dip_addr_str, 0);
+  ret = av_opt_set    (ctx->out_fmt_ctx->priv_data, "p_tx_ip",      ctx->app->dip_addr_str[ctx->app->session_net[ctx->idx].nic_index], 0);
   if (ret < 0) LOG_WARN("ST20P TX(%d): av_opt_set p_tx_ip failed (ret=%d)", ctx->idx, ret);
   ret = av_opt_set_int(ctx->out_fmt_ctx->priv_data, "udp_port",     (int64_t)udp_port,      0);
   if (ret < 0) LOG_WARN("ST20P TX(%d): av_opt_set_int udp_port failed (ret=%d)", ctx->idx, ret);

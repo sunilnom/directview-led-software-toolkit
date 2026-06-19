@@ -232,24 +232,32 @@ int parse_tx_config(const char* config_file, struct dvledtx_config* config) {
     const char* buf_end = json + nread;
     memset(config, 0, sizeof(*config));
 
-    /* --- interfaces[0] --- */
+    /* --- interfaces[] — parse all entries up to MAX_INTERFACES --- */
     const char* ifaces_arr = find_array(json, buf_end, "interfaces");
     if (ifaces_arr != NULL) {
         const char* ifaces_end = find_array_end(ifaces_arr, buf_end);
         if (ifaces_end != NULL) {
-            const char* first_brace = ifaces_arr + 1;
-            while (first_brace < ifaces_end && *first_brace != '{') first_brace++;
-            if (first_brace < ifaces_end) {
-                const char* iface_obj = first_brace;
+            const char* icursor = ifaces_arr + 1;
+            config->nic_count = 0;
+            while (icursor < ifaces_end && config->nic_count < MAX_INTERFACES) {
+                while (icursor < ifaces_end && *icursor != '{') icursor++;
+                if (icursor >= ifaces_end) break;
+                const char* iface_obj = icursor;
                 const char* iface_end = find_object_end(iface_obj, ifaces_end);
                 if (iface_end == NULL) {
-                    LOG_WARN("interfaces[0] object not properly closed; "
-                           "truncating parse at array end");
-                    iface_end = ifaces_end;
+                    LOG_WARN("interfaces[%d]: object not properly closed; stopping parse",
+                             config->nic_count);
+                    break;
                 }
-                extract_json_string(iface_obj, iface_end, "name", config->interface_name, sizeof(config->interface_name));
-                extract_json_string(iface_obj, iface_end, "sip",  config->interface_sip,  sizeof(config->interface_sip));
-                extract_json_string(iface_obj, iface_end, "dip",  config->interface_dip,  sizeof(config->interface_dip));
+                int n = config->nic_count;
+                extract_json_string(iface_obj, iface_end, "name",
+                                    config->interface_name[n], sizeof(config->interface_name[n]));
+                extract_json_string(iface_obj, iface_end, "sip",
+                                    config->interface_sip[n],  sizeof(config->interface_sip[n]));
+                extract_json_string(iface_obj, iface_end, "dip",
+                                    config->interface_dip[n],  sizeof(config->interface_dip[n]));
+                config->nic_count++;
+                icursor = iface_end + 1;
             }
         }
     }
@@ -323,6 +331,9 @@ int parse_tx_config(const char* config_file, struct dvledtx_config* config) {
             s->payload_type = 96; /* default to 96 (first dynamic RTP payload type) */
         }
 
+        v = extract_json_int(sess_obj, sess_end, "nic_index");
+        s->nic_index = (v >= 0) ? v : 0;  /* default to NIC 0 for backward compat */
+
         /* crop sub-object */
         const char* crop_obj = find_object(sess_obj, sess_end, "crop");
         if (crop_obj == NULL) {
@@ -362,63 +373,79 @@ int parse_tx_config(const char* config_file, struct dvledtx_config* config) {
 }
 
 int validate_tx_config(const struct dvledtx_config* config) {
-    /* Interface validation */
-    if (config->interface_name[0] == '\0') {
-        LOG_ERROR("interfaces[0].name is required");
-        return -1;
-    }
-    if (config->interface_dip[0] == '\0') {
-        LOG_ERROR("interfaces[0].dip is required");
+    /* Interface validation — loop over all parsed NICs */
+    if (config->nic_count == 0) {
+        LOG_ERROR("'interfaces' array is empty or missing");
         return -1;
     }
 
-    /* Validate IP address format (basic dotted-quad check) */
-    if (config->interface_sip[0] != '\0') {
-        struct in_addr tmp;
-        if (inet_pton(AF_INET, config->interface_sip, &tmp) != 1) {
-            LOG_ERROR("Invalid source IP address '%s'", config->interface_sip);
-            return -1;
-        }
-    }
-    {
-        struct in_addr tmp;
-        if (inet_pton(AF_INET, config->interface_dip, &tmp) != 1) {
-            LOG_ERROR("Invalid destination IP address '%s'", config->interface_dip);
-            return -1;
-        }
-        /* D-3: Validate DIP is within multicast range (224.0.0.0/4) */
-        uint32_t dip_host = ntohl(tmp.s_addr);
-        if ((dip_host & 0xF0000000U) != 0xE0000000U) {
-            LOG_ERROR("Destination IP '%s' is not a valid multicast address "
-                   "(must be in 224.0.0.0/4)", config->interface_dip);
-            return -1;
-        }
-        /* Warn if not in administratively-scoped range 239.0.0.0/8 */
-        if ((dip_host >> 24) != 239) {
-            LOG_WARN("Destination IP '%s' is outside the administratively-scoped "
-                   "multicast range (239.0.0.0/8)", config->interface_dip);
-        }
+    regex_t bdf_regex;
+    int reti = regcomp(&bdf_regex,
+        "^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\\.[0-9]$",
+        REG_EXTENDED | REG_NOSUB);
+    if (reti != 0) {
+        LOG_ERROR("Internal error: PCI BDF regex compilation failed");
+        return -1;
     }
 
-    /* S-2: Validate PCI BDF format (e.g. "0000:06:00.0") */
-    if (config->interface_name[0] != '\0') {
-        regex_t regex;
-        int reti = regcomp(&regex,
-            "^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\\.[0-9]$",
-            REG_EXTENDED | REG_NOSUB);
-        if (reti != 0) {
-            LOG_ERROR("Internal error: PCI BDF regex compilation failed");
+    for (int ni = 0; ni < config->nic_count; ni++) {
+        if (config->interface_name[ni][0] == '\0') {
+            LOG_ERROR("interfaces[%d].name is required", ni);
+            regfree(&bdf_regex);
             return -1;
         }
-        reti = regexec(&regex, config->interface_name, 0, NULL, 0);
-        regfree(&regex);
+        if (config->interface_dip[ni][0] == '\0') {
+            LOG_ERROR("interfaces[%d].dip is required", ni);
+            regfree(&bdf_regex);
+            return -1;
+        }
+
+        /* Validate source IP format */
+        if (config->interface_sip[ni][0] != '\0') {
+            struct in_addr tmp;
+            if (inet_pton(AF_INET, config->interface_sip[ni], &tmp) != 1) {
+                LOG_ERROR("interfaces[%d]: invalid source IP address '%s'",
+                          ni, config->interface_sip[ni]);
+                regfree(&bdf_regex);
+                return -1;
+            }
+        }
+
+        /* Validate destination IP — must be multicast */
+        {
+            struct in_addr tmp;
+            if (inet_pton(AF_INET, config->interface_dip[ni], &tmp) != 1) {
+                LOG_ERROR("interfaces[%d]: invalid destination IP address '%s'",
+                          ni, config->interface_dip[ni]);
+                regfree(&bdf_regex);
+                return -1;
+            }
+            uint32_t dip_host = ntohl(tmp.s_addr);
+            if ((dip_host & 0xF0000000U) != 0xE0000000U) {
+                LOG_ERROR("interfaces[%d]: destination IP '%s' is not a valid "
+                          "multicast address (must be in 224.0.0.0/4)",
+                          ni, config->interface_dip[ni]);
+                regfree(&bdf_regex);
+                return -1;
+            }
+            if ((dip_host >> 24) != 239) {
+                LOG_WARN("interfaces[%d]: destination IP '%s' is outside the "
+                         "administratively-scoped multicast range (239.0.0.0/8)",
+                         ni, config->interface_dip[ni]);
+            }
+        }
+
+        /* S-2: Validate PCI BDF format (e.g. "0000:06:00.0") */
+        reti = regexec(&bdf_regex, config->interface_name[ni], 0, NULL, 0);
         if (reti != 0) {
-            LOG_ERROR("Invalid PCI BDF format '%s' "
-                   "(expected DDDD:DD:DD.D hex pattern)",
-                   config->interface_name);
+            LOG_ERROR("interfaces[%d]: invalid PCI BDF format '%s' "
+                      "(expected DDDD:DD:DD.D hex pattern)",
+                      ni, config->interface_name[ni]);
+            regfree(&bdf_regex);
             return -1;
         }
     }
+    regfree(&bdf_regex);
 
     /* Video resolution validation */
     if (config->width == 0 || config->height == 0) {
@@ -514,6 +541,13 @@ int validate_tx_config(const struct dvledtx_config* config) {
     for (int i = 0; i < config->session_count; i++) {
         const struct tx_session_config* s = &config->sessions[i];
 
+        /* nic_index must reference a parsed interface */
+        if (s->nic_index < 0 || s->nic_index >= config->nic_count) {
+            LOG_ERROR("session %d: nic_index %d is out of range [0..%d]",
+                      i, s->nic_index, config->nic_count - 1);
+            return -1;
+        }
+
         /* UDP port range */
         if (s->udp_port == 0) {
             LOG_ERROR("session %d: udp_port must be non-zero", i);
@@ -592,11 +626,13 @@ int validate_tx_config(const struct dvledtx_config* config) {
             }
         }
 
-        /* Check for duplicate UDP ports */
+        /* Check for duplicate UDP ports on the same NIC
+         * (same port on different NICs is valid — separate interfaces) */
         for (int j = 0; j < i; j++) {
-            if (config->sessions[j].udp_port == s->udp_port) {
-                LOG_ERROR("session %d and %d have duplicate udp_port %d",
-                       j, i, s->udp_port);
+            if (config->sessions[j].udp_port == s->udp_port &&
+                config->sessions[j].nic_index == s->nic_index) {
+                LOG_ERROR("session %d and %d have duplicate udp_port %d on NIC %d",
+                       j, i, s->udp_port, s->nic_index);
                 return -1;
             }
         }
@@ -621,17 +657,22 @@ int load_and_apply_config(struct dvledtx_context* app, const char* config_file) 
         return -1;
     }
 
-    /* Interface */
-    strncpy(app->port, config.interface_name, sizeof(app->port) - 1);
-    app->port[sizeof(app->port) - 1] = '\0';
+    /* Interface — copy all NICs */
+    app->nic_count = config.nic_count;
+    for (int ni = 0; ni < config.nic_count; ni++) {
+        strncpy(app->port[ni], config.interface_name[ni], sizeof(app->port[ni]) - 1);
+        app->port[ni][sizeof(app->port[ni]) - 1] = '\0';
 
-    if (config.interface_sip[0] != '\0') {
-        strncpy(app->sip_addr_str, config.interface_sip, sizeof(app->sip_addr_str) - 1);
-        app->sip_addr_str[sizeof(app->sip_addr_str) - 1] = '\0';
+        if (config.interface_sip[ni][0] != '\0') {
+            strncpy(app->sip_addr_str[ni], config.interface_sip[ni],
+                    sizeof(app->sip_addr_str[ni]) - 1);
+            app->sip_addr_str[ni][sizeof(app->sip_addr_str[ni]) - 1] = '\0';
+        }
+
+        strncpy(app->dip_addr_str[ni], config.interface_dip[ni],
+                sizeof(app->dip_addr_str[ni]) - 1);
+        app->dip_addr_str[ni][sizeof(app->dip_addr_str[ni]) - 1] = '\0';
     }
-
-    strncpy(app->dip_addr_str, config.interface_dip, sizeof(app->dip_addr_str) - 1);
-    app->dip_addr_str[sizeof(app->dip_addr_str) - 1] = '\0';
 
     /* Video */
     app->width  = config.width;
@@ -668,6 +709,7 @@ int load_and_apply_config(struct dvledtx_context* app, const char* config_file) 
         app->session_net[i].crop_y       = config.sessions[i].crop_y;
         app->session_net[i].crop_w       = config.sessions[i].crop_w;
         app->session_net[i].crop_h       = config.sessions[i].crop_h;
+        app->session_net[i].nic_index    = config.sessions[i].nic_index;
     }
 
     /* Use first session's udp_port as the legacy app->udp_port
@@ -681,10 +723,12 @@ int load_and_apply_config(struct dvledtx_context* app, const char* config_file) 
         app->log_file[sizeof(app->log_file) - 1] = '\0';
     }
 
-    LOG_INFO("Config loaded: %s (interface=%s sip=%s dip=%s)",
-           config_file, config.interface_name,
-           config.interface_sip[0] ? config.interface_sip : "dhcp",
-           config.interface_dip);
+    LOG_INFO("Config loaded: %s (%d NIC(s))", config_file, config.nic_count);
+    for (int ni = 0; ni < config.nic_count; ni++)
+        LOG_INFO("  NIC[%d]: interface=%s sip=%s dip=%s", ni,
+                 config.interface_name[ni],
+                 config.interface_sip[ni][0] ? config.interface_sip[ni] : "dhcp",
+                 config.interface_dip[ni]);
     if (config.scale_width > 0 && config.scale_height > 0)
         LOG_INFO("Video: %ux%u -> scale %ux%u %dfps %s  tx_url=%s",
                config.width, config.height,
@@ -715,17 +759,21 @@ int load_and_apply_config(struct dvledtx_context* app, const char* config_file) 
  * dip_addr_str is mandatory — the multicast destination IP must be valid.
  * -------------------------------------------------------------------------*/
 int resolve_ip_addrs(struct dvledtx_context* ctx) {
-    if (ctx->sip_addr_str[0] != '\0') {
-        if (inet_pton(AF_INET, ctx->sip_addr_str, ctx->sip_addr) != 1) {
-            LOG_ERROR("Invalid source IP address %s", ctx->sip_addr_str);
+    for (int ni = 0; ni < ctx->nic_count; ni++) {
+        if (ctx->sip_addr_str[ni][0] != '\0') {
+            if (inet_pton(AF_INET, ctx->sip_addr_str[ni], ctx->sip_addr[ni]) != 1) {
+                LOG_ERROR("NIC[%d]: invalid source IP address %s",
+                          ni, ctx->sip_addr_str[ni]);
+                return -1;
+            }
+        } else {
+            LOG_INFO("NIC[%d]: no source IP provided, DHCP mode", ni);
+        }
+        if (inet_pton(AF_INET, ctx->dip_addr_str[ni], ctx->dip_addr[ni]) != 1) {
+            LOG_ERROR("NIC[%d]: invalid destination IP address %s",
+                      ni, ctx->dip_addr_str[ni]);
             return -1;
         }
-    } else {
-        LOG_INFO("No source IP provided, DHCP mode");
-    }
-    if (inet_pton(AF_INET, ctx->dip_addr_str, ctx->dip_addr) != 1) {
-        LOG_ERROR("Invalid destination IP address %s", ctx->dip_addr_str);
-        return -1;
     }
     return 0;
 }

@@ -281,9 +281,10 @@ static void reset_mock_counters(void)
 static void fill_app(struct dvledtx_context* app, int sessions, const char* url)
 {
     memset(app, 0, sizeof(*app));
-    strncpy(app->port,         "0000:06:00.0",  sizeof(app->port) - 1);
-    strncpy(app->sip_addr_str, "192.168.50.29", sizeof(app->sip_addr_str) - 1);
-    strncpy(app->dip_addr_str, "239.168.85.20", sizeof(app->dip_addr_str) - 1);
+    strncpy(app->port[0],         "0000:06:00.0",  sizeof(app->port[0]) - 1);
+    strncpy(app->sip_addr_str[0], "192.168.50.29", sizeof(app->sip_addr_str[0]) - 1);
+    strncpy(app->dip_addr_str[0], "239.168.85.20", sizeof(app->dip_addr_str[0]) - 1);
+    app->nic_count = 1;
     strncpy(app->tx_url, url, sizeof(app->tx_url) - 1);
     app->width          = 1920;
     app->height         = 1080;
