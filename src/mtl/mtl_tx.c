@@ -206,7 +206,11 @@ int mtl_tx_init(session_manager_t* manager, struct dvledtx_context* app) {
   mtl_params.num_ports = app->nic_count;
 
   /* Count sessions assigned to each NIC for queue allocation */
-  int sessions_per_nic[MAX_INTERFACES] = {0};
+  int* sessions_per_nic = calloc((size_t)app->nic_count, sizeof(int));
+  if (sessions_per_nic == NULL) {
+    LOG_ERROR("Failed to allocate sessions_per_nic array");
+    return -1;
+  }
   for (int i = 0; i < app->st20p_sessions; i++) {
     int ni = app->session_net[i].nic_index;
     if (ni >= 0 && ni < app->nic_count)
@@ -214,18 +218,20 @@ int mtl_tx_init(session_manager_t* manager, struct dvledtx_context* app) {
   }
 
   for (int ni = 0; ni < app->nic_count; ni++) {
-    snprintf(mtl_params.port[ni], MTL_PORT_MAX_LEN, "%s", app->port[ni]);
-    memcpy(mtl_params.sip_addr[ni], app->sip_addr[ni], MTL_IP_ADDR_LEN);
-    mtl_params.pmd[ni] = mtl_pmd_by_port_name(app->port[ni]);
+    snprintf(mtl_params.port[ni], MTL_PORT_MAX_LEN, "%s", app->nics[ni].port);
+    memcpy(mtl_params.sip_addr[ni], app->nics[ni].sip_addr, MTL_IP_ADDR_LEN);
+    mtl_params.pmd[ni] = mtl_pmd_by_port_name(app->nics[ni].port);
 
     uint16_t tx_queues = (uint16_t)(sessions_per_nic[ni] + 2);
-    uint16_t rx_queues = 2;
+    uint16_t rx_queues = 1; /* minimal RX for control traffic; MTL adds 1 system queue */
     mtl_params.tx_queues_cnt[ni] = tx_queues;
     mtl_params.rx_queues_cnt[ni] = rx_queues;
 
     LOG_INFO("MTL init: port[%d]=%s pmd=%d tx_queues=%d rx_queues=%d",
-             ni, app->port[ni], mtl_params.pmd[ni], tx_queues, rx_queues);
+             ni, app->nics[ni].port, mtl_params.pmd[ni], tx_queues, rx_queues);
   }
+
+  free(sessions_per_nic);
 
   manager->mtl = mtl_init(&mtl_params);
   if (!manager->mtl) {
@@ -267,8 +273,8 @@ int mtl_tx_session_create(session_manager_t* manager, struct st20p_tx_ctx* ctx,
 
   ops.port.num_port = 1;
   int nic = app->session_net[session_idx].nic_index;
-  memcpy(ops.port.dip_addr[MTL_SESSION_PORT_P], app->dip_addr[nic], MTL_IP_ADDR_LEN);
-  snprintf(ops.port.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s", app->port[nic]);
+  memcpy(ops.port.dip_addr[MTL_SESSION_PORT_P], app->nics[nic].dip_addr, MTL_IP_ADDR_LEN);
+  snprintf(ops.port.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s", app->nics[nic].port);
 
   int udp_port = app->session_net[session_idx].udp_port;
   if (udp_port == 0) udp_port = (int)app->udp_port + (session_idx * 2);

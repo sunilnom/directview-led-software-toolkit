@@ -60,7 +60,14 @@ static char *write_tmpfile(const char *content)
 static void fill_valid_config(struct dvledtx_config *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
+
+    /* Allocate dynamic arrays */
+    cfg->nic_cap = 1;
+    cfg->interface_name = calloc(1, sizeof(*cfg->interface_name));
+    cfg->interface_sip  = calloc(1, sizeof(*cfg->interface_sip));
+    cfg->interface_dip  = calloc(1, sizeof(*cfg->interface_dip));
     cfg->nic_count = 1;
+
     strncpy(cfg->interface_name[0], "0000:06:00.0",   sizeof(cfg->interface_name[0]) - 1);
     strncpy(cfg->interface_sip[0],  "192.168.50.29",  sizeof(cfg->interface_sip[0])  - 1);
     strncpy(cfg->interface_dip[0],  "239.168.85.20",  sizeof(cfg->interface_dip[0])  - 1);
@@ -69,6 +76,8 @@ static void fill_valid_config(struct dvledtx_config *cfg)
     cfg->fps    = 30;
     strncpy(cfg->fmt, "yuv422p10le", sizeof(cfg->fmt) - 1);
     /* tx_url intentionally left empty — skips file-open check in validate */
+    cfg->session_cap = 1;
+    cfg->sessions = calloc(1, sizeof(*cfg->sessions));
     cfg->session_count = 1;
     cfg->sessions[0].udp_port     = 20000;
     cfg->sessions[0].payload_type = 96;
@@ -453,7 +462,13 @@ static void test_validate_3sessions_tiled_layout_passes(void **state)
     /* Mirrors tx_fullhd_multi_session.json: three 640-wide horizontal tiles */
     struct dvledtx_config cfg;
     memset(&cfg, 0, sizeof(cfg));
+
+    cfg.nic_cap = 1;
+    cfg.interface_name = calloc(1, sizeof(*cfg.interface_name));
+    cfg.interface_sip  = calloc(1, sizeof(*cfg.interface_sip));
+    cfg.interface_dip  = calloc(1, sizeof(*cfg.interface_dip));
     cfg.nic_count = 1;
+
     strncpy(cfg.interface_name[0], "0000:06:00.0",   sizeof(cfg.interface_name[0]) - 1);
     strncpy(cfg.interface_sip[0],  "192.168.50.29",  sizeof(cfg.interface_sip[0])  - 1);
     strncpy(cfg.interface_dip[0],  "239.168.85.20",  sizeof(cfg.interface_dip[0])  - 1);
@@ -461,6 +476,9 @@ static void test_validate_3sessions_tiled_layout_passes(void **state)
     cfg.height = 1080;
     cfg.fps    = 30;
     strncpy(cfg.fmt, "yuv420", sizeof(cfg.fmt) - 1);
+
+    cfg.session_cap = 3;
+    cfg.sessions = calloc(3, sizeof(*cfg.sessions));
     cfg.session_count = 3;
 
     const uint16_t ports[] = {20000, 20002, 20004};
@@ -474,6 +492,7 @@ static void test_validate_3sessions_tiled_layout_passes(void **state)
         cfg.sessions[i].crop_h = 1080;
     }
     assert_int_equal(validate_tx_config(&cfg), 0);
+    dvledtx_config_free(&cfg);
 }
 
 /* ==========================================================================
@@ -772,12 +791,21 @@ static void test_validate_duplicate_udp_ports_fails(void **state)
     (void)state;
     struct dvledtx_config cfg;
     memset(&cfg, 0, sizeof(cfg));
+
+    cfg.nic_cap = 1;
+    cfg.interface_name = calloc(1, sizeof(*cfg.interface_name));
+    cfg.interface_sip  = calloc(1, sizeof(*cfg.interface_sip));
+    cfg.interface_dip  = calloc(1, sizeof(*cfg.interface_dip));
     cfg.nic_count = 1;
+
     strncpy(cfg.interface_name[0], "0000:06:00.0", sizeof(cfg.interface_name[0]) - 1);
     strncpy(cfg.interface_sip[0],  "192.168.1.1",  sizeof(cfg.interface_sip[0])  - 1);
     strncpy(cfg.interface_dip[0],  "239.0.0.1",    sizeof(cfg.interface_dip[0])  - 1);
     cfg.width = 1920; cfg.height = 1080; cfg.fps = 25;
     strncpy(cfg.fmt, "yuv422p10le", sizeof(cfg.fmt) - 1);
+
+    cfg.session_cap = 2;
+    cfg.sessions = calloc(2, sizeof(*cfg.sessions));
     cfg.session_count = 2;
     cfg.sessions[0].udp_port = 20000; cfg.sessions[0].payload_type = 96;
     cfg.sessions[0].crop_x = 0;   cfg.sessions[0].crop_y = 0;
@@ -787,6 +815,7 @@ static void test_validate_duplicate_udp_ports_fails(void **state)
     cfg.sessions[1].crop_x = 960; cfg.sessions[1].crop_y = 0;
     cfg.sessions[1].crop_w = 960; cfg.sessions[1].crop_h = 1080;
     assert_int_equal(validate_tx_config(&cfg), -1);
+    dvledtx_config_free(&cfg);
 }
 
 static void test_validate_crop_x_misaligned_for_yuv422_fails(void **state)
@@ -1171,7 +1200,7 @@ static void test_load_and_apply_config_populates_app_context(void **state)
     int ret = load_and_apply_config(&app, path);
     unlink(path); free(path);
     assert_int_equal(ret, 0);
-    assert_string_equal(app.port[0], "0000:06:00.0");
+    assert_string_equal(app.nics[0].port, "0000:06:00.0");
     assert_int_equal((int)app.width,  1920);
     assert_int_equal((int)app.height, 1080);
     assert_int_equal(app.fps, 30);
@@ -1179,6 +1208,7 @@ static void test_load_and_apply_config_populates_app_context(void **state)
     assert_int_equal(app.st20p_sessions, 1);
     assert_int_equal(app.session_net[0].udp_port, 20000);
     assert_int_equal(app.session_net[0].payload_type, 96);
+    dvledtx_context_free(&app);
 }
 
 static void test_load_and_apply_config_fmt_yuv444p(void **state)
@@ -1192,6 +1222,7 @@ static void test_load_and_apply_config_fmt_yuv444p(void **state)
     unlink(path); free(path);
     assert_int_equal(ret, 0);
     assert_int_equal(app.fmt, AV_PIX_FMT_YUV444P10LE);
+    dvledtx_context_free(&app);
 }
 
 static void test_load_and_apply_config_fmt_gbrp10le(void **state)
@@ -1205,6 +1236,7 @@ static void test_load_and_apply_config_fmt_gbrp10le(void **state)
     unlink(path); free(path);
     assert_int_equal(ret, 0);
     assert_int_equal(app.fmt, AV_PIX_FMT_GBRP10LE);
+    dvledtx_context_free(&app);
 }
 
 static void test_load_and_apply_config_fmt_yuv420(void **state)
@@ -1218,6 +1250,7 @@ static void test_load_and_apply_config_fmt_yuv420(void **state)
     unlink(path); free(path);
     assert_int_equal(ret, 0);
     assert_int_equal(app.fmt, AV_PIX_FMT_YUV420P);
+    dvledtx_context_free(&app);
 }
 
 static void test_load_and_apply_config_unknown_fmt_fails(void **state)
@@ -1251,6 +1284,7 @@ static void test_load_and_apply_config_copies_log_file(void **state)
     unlink(path); free(path);
     assert_int_equal(ret, 0);
     assert_string_equal(app.log_file, "myapp.log");
+    dvledtx_context_free(&app);
 }
 
 /* ==========================================================================

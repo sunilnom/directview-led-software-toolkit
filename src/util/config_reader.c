@@ -232,14 +232,15 @@ int parse_tx_config(const char* config_file, struct dvledtx_config* config) {
     const char* buf_end = json + nread;
     memset(config, 0, sizeof(*config));
 
-    /* --- interfaces[] — parse all entries up to MAX_INTERFACES --- */
+    /* --- interfaces[] — parse all entries, growing arrays as needed --- */
     const char* ifaces_arr = find_array(json, buf_end, "interfaces");
     if (ifaces_arr != NULL) {
         const char* ifaces_end = find_array_end(ifaces_arr, buf_end);
         if (ifaces_end != NULL) {
             const char* icursor = ifaces_arr + 1;
             config->nic_count = 0;
-            while (icursor < ifaces_end && config->nic_count < MAX_INTERFACES) {
+            config->nic_cap   = 0;
+            while (icursor < ifaces_end) {
                 while (icursor < ifaces_end && *icursor != '{') icursor++;
                 if (icursor >= ifaces_end) break;
                 const char* iface_obj = icursor;
@@ -248,6 +249,25 @@ int parse_tx_config(const char* config_file, struct dvledtx_config* config) {
                     LOG_WARN("interfaces[%d]: object not properly closed; stopping parse",
                              config->nic_count);
                     break;
+                }
+                /* Grow arrays if needed */
+                if (config->nic_count >= config->nic_cap) {
+                    int new_cap = config->nic_cap == 0 ? 4 : config->nic_cap * 2;
+                    char (*nn)[64] = realloc(config->interface_name, (size_t)new_cap * sizeof(*nn));
+                    char (*ns)[32] = realloc(config->interface_sip,  (size_t)new_cap * sizeof(*ns));
+                    char (*nd)[32] = realloc(config->interface_dip,  (size_t)new_cap * sizeof(*nd));
+                    if (!nn || !ns || !nd) {
+                        LOG_ERROR("realloc failed for interface arrays");
+                        free(json); dvledtx_config_free(config); return -1;
+                    }
+                    /* Zero the newly allocated slots */
+                    memset(nn + config->nic_cap, 0, (size_t)(new_cap - config->nic_cap) * sizeof(*nn));
+                    memset(ns + config->nic_cap, 0, (size_t)(new_cap - config->nic_cap) * sizeof(*ns));
+                    memset(nd + config->nic_cap, 0, (size_t)(new_cap - config->nic_cap) * sizeof(*nd));
+                    config->interface_name = nn;
+                    config->interface_sip  = ns;
+                    config->interface_dip  = nd;
+                    config->nic_cap = new_cap;
                 }
                 int n = config->nic_count;
                 extract_json_string(iface_obj, iface_end, "name",
@@ -301,8 +321,9 @@ int parse_tx_config(const char* config_file, struct dvledtx_config* config) {
     /* Walk the array, extracting each '{...}' object */
     const char* cursor = sessions_arr + 1; /* skip '[' */
     config->session_count = 0;
+    config->session_cap   = 0;
 
-    while (cursor < sessions_end && config->session_count < MAX_TX_SESSIONS) {
+    while (cursor < sessions_end) {
         /* advance to next '{' */
         while (cursor < sessions_end && *cursor != '{') cursor++;
         if (cursor >= sessions_end) break;
@@ -310,6 +331,21 @@ int parse_tx_config(const char* config_file, struct dvledtx_config* config) {
         const char* sess_obj = cursor;
         const char* sess_end = find_object_end(sess_obj, sessions_end);
         if (sess_end == NULL) break;
+
+        /* Grow sessions array if needed */
+        if (config->session_count >= config->session_cap) {
+            int new_cap = config->session_cap == 0 ? 8 : config->session_cap * 2;
+            struct tx_session_config* ns = realloc(config->sessions,
+                                                   (size_t)new_cap * sizeof(*ns));
+            if (!ns) {
+                LOG_ERROR("realloc failed for sessions array");
+                free(json); dvledtx_config_free(config); return -1;
+            }
+            memset(ns + config->session_cap, 0,
+                   (size_t)(new_cap - config->session_cap) * sizeof(*ns));
+            config->sessions = ns;
+            config->session_cap = new_cap;
+        }
 
         struct tx_session_config* s = &config->sessions[config->session_count];
         int v;
@@ -370,6 +406,16 @@ int parse_tx_config(const char* config_file, struct dvledtx_config* config) {
 
     free(json);
     return 0;
+}
+
+void dvledtx_config_free(struct dvledtx_config* config) {
+    if (config == NULL) return;
+    free(config->interface_name); config->interface_name = NULL;
+    free(config->interface_sip);  config->interface_sip  = NULL;
+    free(config->interface_dip);  config->interface_dip  = NULL;
+    free(config->sessions);       config->sessions       = NULL;
+    config->nic_count = config->nic_cap = 0;
+    config->session_count = config->session_cap = 0;
 }
 
 int validate_tx_config(const struct dvledtx_config* config) {
@@ -648,30 +694,41 @@ int load_and_apply_config(struct dvledtx_context* app, const char* config_file) 
         return 0; /* no config file — keep CLI defaults */
 
     struct dvledtx_config config;
+    memset(&config, 0, sizeof(config));
     if (parse_tx_config(config_file, &config) != 0) {
         LOG_WARN("Failed to parse config file %s", config_file);
+        dvledtx_config_free(&config);
         return -1;
     }
     if (validate_tx_config(&config) != 0) {
         LOG_WARN("Invalid config file %s", config_file);
+        dvledtx_config_free(&config);
+        return -1;
+    }
+
+    /* Allocate dynamic arrays in app context */
+    dvledtx_context_free(app);  /* free any previous allocation */
+    if (dvledtx_context_alloc(app, config.nic_count, config.session_count) < 0) {
+        LOG_ERROR("Failed to allocate app context arrays");
+        dvledtx_config_free(&config);
         return -1;
     }
 
     /* Interface — copy all NICs */
-    app->nic_count = config.nic_count;
     for (int ni = 0; ni < config.nic_count; ni++) {
-        strncpy(app->port[ni], config.interface_name[ni], sizeof(app->port[ni]) - 1);
-        app->port[ni][sizeof(app->port[ni]) - 1] = '\0';
+        strncpy(app->nics[ni].port, config.interface_name[ni],
+                sizeof(app->nics[ni].port) - 1);
+        app->nics[ni].port[sizeof(app->nics[ni].port) - 1] = '\0';
 
         if (config.interface_sip[ni][0] != '\0') {
-            strncpy(app->sip_addr_str[ni], config.interface_sip[ni],
-                    sizeof(app->sip_addr_str[ni]) - 1);
-            app->sip_addr_str[ni][sizeof(app->sip_addr_str[ni]) - 1] = '\0';
+            strncpy(app->nics[ni].sip_addr_str, config.interface_sip[ni],
+                    sizeof(app->nics[ni].sip_addr_str) - 1);
+            app->nics[ni].sip_addr_str[sizeof(app->nics[ni].sip_addr_str) - 1] = '\0';
         }
 
-        strncpy(app->dip_addr_str[ni], config.interface_dip[ni],
-                sizeof(app->dip_addr_str[ni]) - 1);
-        app->dip_addr_str[ni][sizeof(app->dip_addr_str[ni]) - 1] = '\0';
+        strncpy(app->nics[ni].dip_addr_str, config.interface_dip[ni],
+                sizeof(app->nics[ni].dip_addr_str) - 1);
+        app->nics[ni].dip_addr_str[sizeof(app->nics[ni].dip_addr_str) - 1] = '\0';
     }
 
     /* Video */
@@ -690,6 +747,7 @@ int load_and_apply_config(struct dvledtx_context* app, const char* config_file) 
     else if (strcmp(config.fmt, "gbrp12le") == 0)     app->fmt = AV_PIX_FMT_GBRP12LE;
     else {
         LOG_ERROR("Unsupported pixel format '%s'", config.fmt);
+        dvledtx_config_free(&config);
         return -1;
     }
 
@@ -697,9 +755,6 @@ int load_and_apply_config(struct dvledtx_context* app, const char* config_file) 
         strncpy(app->tx_url, config.tx_url, sizeof(app->tx_url) - 1);
         app->tx_url[sizeof(app->tx_url) - 1] = '\0';
     }
-
-    /* Sessions — count drives how many TX sessions are created */
-    app->st20p_sessions = config.session_count;
 
     /* Copy per-session network + crop into app->session_net[] */
     for (int i = 0; i < config.session_count; i++) {
@@ -723,7 +778,8 @@ int load_and_apply_config(struct dvledtx_context* app, const char* config_file) 
         app->log_file[sizeof(app->log_file) - 1] = '\0';
     }
 
-    LOG_INFO("Config loaded: %s (%d NIC(s))", config_file, config.nic_count);
+    LOG_INFO("Config loaded: %s (%d NIC(s), %d session(s))",
+             config_file, config.nic_count, config.session_count);
     for (int ni = 0; ni < config.nic_count; ni++)
         LOG_INFO("  NIC[%d]: interface=%s sip=%s dip=%s", ni,
                  config.interface_name[ni],
@@ -740,11 +796,13 @@ int load_and_apply_config(struct dvledtx_context* app, const char* config_file) 
                config.width, config.height, config.fps, config.fmt,
                config.tx_url[0] ? config.tx_url : "<none>");
     for (int i = 0; i < config.session_count; i++)
-        LOG_INFO("  Session %d: udp_port=%u pt=%u crop=[%d,%d %dx%d]", i,
+        LOG_INFO("  Session %d: udp_port=%u pt=%u nic=%d crop=[%d,%d %dx%d]", i,
                config.sessions[i].udp_port, config.sessions[i].payload_type,
+               config.sessions[i].nic_index,
                config.sessions[i].crop_x, config.sessions[i].crop_y,
                config.sessions[i].crop_w, config.sessions[i].crop_h);
 
+    dvledtx_config_free(&config);
     return 0;
 }
 
@@ -760,18 +818,20 @@ int load_and_apply_config(struct dvledtx_context* app, const char* config_file) 
  * -------------------------------------------------------------------------*/
 int resolve_ip_addrs(struct dvledtx_context* ctx) {
     for (int ni = 0; ni < ctx->nic_count; ni++) {
-        if (ctx->sip_addr_str[ni][0] != '\0') {
-            if (inet_pton(AF_INET, ctx->sip_addr_str[ni], ctx->sip_addr[ni]) != 1) {
+        if (ctx->nics[ni].sip_addr_str[0] != '\0') {
+            if (inet_pton(AF_INET, ctx->nics[ni].sip_addr_str,
+                          ctx->nics[ni].sip_addr) != 1) {
                 LOG_ERROR("NIC[%d]: invalid source IP address %s",
-                          ni, ctx->sip_addr_str[ni]);
+                          ni, ctx->nics[ni].sip_addr_str);
                 return -1;
             }
         } else {
             LOG_INFO("NIC[%d]: no source IP provided, DHCP mode", ni);
         }
-        if (inet_pton(AF_INET, ctx->dip_addr_str[ni], ctx->dip_addr[ni]) != 1) {
+        if (inet_pton(AF_INET, ctx->nics[ni].dip_addr_str,
+                      ctx->nics[ni].dip_addr) != 1) {
             LOG_ERROR("NIC[%d]: invalid destination IP address %s",
-                      ni, ctx->dip_addr_str[ni]);
+                      ni, ctx->nics[ni].dip_addr_str);
             return -1;
         }
     }
