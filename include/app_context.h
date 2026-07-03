@@ -55,6 +55,10 @@ struct dvledtx_context {
   int fps;                    /* frames per second: 25, 30, 50, 60 */
   enum AVPixelFormat fmt;     /* e.g. AV_PIX_FMT_YUV422P10LE */
 
+  /* VAAPI hardware-accelerated decode */
+  bool use_vaapi_decode;       /* enable VAAPI decode of tx_url source     */
+  char vaapi_device[64];       /* e.g. /dev/dri/renderD128                 */
+
   /* Session controls */
   int st20p_sessions;
   bool exit;

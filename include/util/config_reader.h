@@ -39,6 +39,10 @@ struct dvledtx_config {
   char     fmt[32];         /* e.g. "yuv422p10le" */
   char     tx_url[256];
 
+  /* VAAPI hardware-accelerated decode (optional, under "video" block) */
+  bool     use_vaapi_decode;
+  char     vaapi_device[64];   /* e.g. "/dev/dri/renderD128" */
+
   /* optional log file path (empty = console only) */
   char log_file[256];
 

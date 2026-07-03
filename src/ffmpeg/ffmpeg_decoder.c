@@ -19,7 +19,12 @@
 #include <libavcodec/avcodec.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/pixdesc.h>
+#include <libavutil/hwcontext.h>
 #include <libswscale/swscale.h>
+
+/* Pixel format the VAAPI decode+transfer path lands on for CPU-side access.
+ * Intel VAAPI HEVC/H.264 8-bit decode surfaces are NV12. */
+#define VAAPI_SW_TRANSFER_FMT AV_PIX_FMT_NV12
 
 /* =========================================================================
  * Helpers
@@ -127,21 +132,37 @@ void* shared_decode_thread(void* arg) {
 
       /* Try to pull a decoded raw frame from the decoder's output queue.
        * EAGAIN = decoder needs more packets (B-frame reorder) → loop again.
-       * 0      = got a full decoded frame in dec->av_frame (yuv420p). */
+       * 0      = got a full decoded frame in dec->av_frame (yuv420p, or an
+       *          opaque AV_PIX_FMT_VAAPI GPU surface when hw decode is on). */
       ret = avcodec_receive_frame(dec->codec_ctx, dec->av_frame);
       if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) continue;
       if (ret < 0) break;
 
+      /* VAAPI hw decode: sws_scale can't read the opaque GPU surface, so
+       * copy it down to a CPU-side NV12 frame first. */
+      AVFrame* decoded_frame = dec->av_frame;
+      if (dec->av_frame->format == AV_PIX_FMT_VAAPI) {
+        if (dec->hw_sw_frame == NULL ||
+            av_hwframe_transfer_data(dec->hw_sw_frame, dec->av_frame, 0) < 0) {
+          LOG_ERROR("Shared decode: av_hwframe_transfer_data failed");
+          av_frame_unref(dec->av_frame);
+          continue;
+        }
+        decoded_frame = dec->hw_sw_frame;
+      }
+
       /* Colour-convert + chroma upsample: yuv420p (8-bit) → yuv422p10le (10-bit).
        * Output goes into dec->yuv_frame — the single shared full-width (1920px)
        * buffer that all TX threads will read from simultaneously. */
-      int rows = convert_frame_format(dec->sws_ctx, dec->av_frame,
+      int rows = convert_frame_format(dec->sws_ctx, decoded_frame,
                                       dec->codec_ctx->height, dec->yuv_frame);
       av_frame_unref(dec->av_frame); /* return decoded frame back to FFmpeg pool */
+      if (decoded_frame == dec->hw_sw_frame) av_frame_unref(dec->hw_sw_frame);
       if (rows <= 0) {
         LOG_ERROR("Shared decode: convert_frame_format failed (ret=%d)", rows);
         continue; /* don't send garbage frame to TX threads */
       }
+
 
       dec->frame_counter++;
       got_frame = true;
@@ -187,6 +208,23 @@ void* shared_decode_thread(void* arg) {
 }
 
 /* =========================================================================
+ * VAAPI hardware decode support
+ * ========================================================================= */
+
+/* AVCodecContext.get_format callback — forces the decoder to negotiate the
+ * VAAPI hw pixel format when a hw_device_ctx is attached. Falls back to the
+ * decoder's first offered (software) format if VAAPI isn't in the list. */
+static enum AVPixelFormat vaapi_get_format(AVCodecContext* ctx,
+                                            const enum AVPixelFormat* pix_fmts) {
+  (void)ctx;
+  for (const enum AVPixelFormat* p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
+    if (*p == AV_PIX_FMT_VAAPI) return *p;
+  }
+  LOG_WARN("VAAPI pixel format not offered by decoder; using software format");
+  return pix_fmts[0];
+}
+
+/* =========================================================================
  * Common FFmpeg decoder open/close helpers
  *
  * Both the shared decode path (open_shared_ffmpeg) and the per-session
@@ -200,12 +238,17 @@ void* shared_decode_thread(void* arg) {
 static int open_ffmpeg_decoder(
     const char* filename, const char* log_prefix,
     enum AVPixelFormat target_fmt, int target_w, int target_h,
+    bool use_vaapi, const char* vaapi_device,
     AVFormatContext** out_fmt_ctx, AVCodecContext** out_codec_ctx,
     struct SwsContext** out_sws_ctx, AVFrame** out_av_frame,
-    AVFrame** out_yuv_frame, AVPacket** out_av_packet,
+    AVFrame** out_yuv_frame, AVFrame** out_hw_sw_frame, AVPacket** out_av_packet,
+    AVBufferRef** out_hw_device_ctx,
     int* out_video_stream_idx) {
   char errbuf[256];
   int ret;
+
+  *out_hw_device_ctx = NULL;
+  *out_hw_sw_frame = NULL;
 
   ret = avformat_open_input(out_fmt_ctx, filename, NULL, NULL);
   if (ret < 0) {
@@ -253,21 +296,46 @@ static int open_ffmpeg_decoder(
     return -1;
   }
   (*out_codec_ctx)->thread_count = 4;
+
+  if (use_vaapi) {
+    ret = av_hwdevice_ctx_create(out_hw_device_ctx, AV_HWDEVICE_TYPE_VAAPI,
+                                 vaapi_device, NULL, 0);
+    if (ret < 0) {
+      av_strerror(ret, errbuf, sizeof(errbuf));
+      LOG_ERROR("%s: av_hwdevice_ctx_create(vaapi, %s) failed: %s -- "
+                "falling back to software decode", log_prefix, vaapi_device, errbuf);
+      *out_hw_device_ctx = NULL;
+    } else {
+      (*out_codec_ctx)->hw_device_ctx = av_buffer_ref(*out_hw_device_ctx);
+      (*out_codec_ctx)->get_format = vaapi_get_format;
+    }
+  }
+
   ret = avcodec_open2(*out_codec_ctx, codec, NULL);
   if (ret < 0) {
     av_strerror(ret, errbuf, sizeof(errbuf));
     LOG_ERROR("%s: avcodec_open2 failed: %s", log_prefix, errbuf);
+    if (*out_hw_device_ctx != NULL) av_buffer_unref(out_hw_device_ctx);
     avcodec_free_context(out_codec_ctx);
     avformat_close_input(out_fmt_ctx);
     return -1;
   }
 
+  /* When VAAPI decode is active the codec produces AV_PIX_FMT_VAAPI opaque
+   * GPU surfaces; sws_scale can't read those directly, so frames are first
+   * transferred to a CPU-side NV12 frame (out_hw_sw_frame) and sws_scale's
+   * source format is set to NV12 instead of the decoder's raw pix_fmt. */
+  enum AVPixelFormat sws_src_fmt = (*out_hw_device_ctx != NULL)
+                                     ? VAAPI_SW_TRANSFER_FMT
+                                     : (*out_codec_ctx)->pix_fmt;
+
   *out_sws_ctx = sws_getContext(
-    (*out_codec_ctx)->width, (*out_codec_ctx)->height, (*out_codec_ctx)->pix_fmt,
+    (*out_codec_ctx)->width, (*out_codec_ctx)->height, sws_src_fmt,
     target_w, target_h, target_fmt,
     SWS_FAST_BILINEAR, NULL, NULL, NULL);
   if (*out_sws_ctx == NULL) {
     LOG_ERROR("%s: sws_getContext failed", log_prefix);
+    if (*out_hw_device_ctx != NULL) av_buffer_unref(out_hw_device_ctx);
     avcodec_free_context(out_codec_ctx);
     avformat_close_input(out_fmt_ctx);
     return -1;
@@ -276,6 +344,7 @@ static int open_ffmpeg_decoder(
   *out_av_frame  = av_frame_alloc();
   *out_yuv_frame = av_frame_alloc();
   *out_av_packet = av_packet_alloc();
+  if (*out_hw_device_ctx != NULL) *out_hw_sw_frame = av_frame_alloc();
 
   (*out_yuv_frame)->format = target_fmt;
   (*out_yuv_frame)->width  = target_w;
@@ -285,18 +354,21 @@ static int open_ffmpeg_decoder(
   if (ret < 0) {
     av_frame_free(out_av_frame);
     av_frame_free(out_yuv_frame);
+    if (*out_hw_sw_frame != NULL) av_frame_free(out_hw_sw_frame);
     av_packet_free(out_av_packet);
     sws_freeContext(*out_sws_ctx); *out_sws_ctx = NULL;
+    if (*out_hw_device_ctx != NULL) av_buffer_unref(out_hw_device_ctx);
     avcodec_free_context(out_codec_ctx);
     avformat_close_input(out_fmt_ctx);
     return -1;
   }
 
-  LOG_INFO("%s: opened '%s' Codec=%s %dx%d %s -> %dx%d %s",
+  LOG_INFO("%s: opened '%s' Codec=%s %dx%d %s -> %dx%d %s%s",
            log_prefix, filename, codec->name,
            (*out_codec_ctx)->width, (*out_codec_ctx)->height,
-           av_get_pix_fmt_name((*out_codec_ctx)->pix_fmt),
-           target_w, target_h, ffmpeg_fmt_name(target_fmt));
+           av_get_pix_fmt_name(sws_src_fmt),
+           target_w, target_h, ffmpeg_fmt_name(target_fmt),
+           (*out_hw_device_ctx != NULL) ? " [VAAPI hw decode]" : "");
   return 0;
 }
 
@@ -304,8 +376,10 @@ static int open_ffmpeg_decoder(
 static void close_ffmpeg_decoder(
     AVFormatContext** fmt_ctx, AVCodecContext** codec_ctx,
     struct SwsContext** sws_ctx, AVFrame** av_frame,
-    AVFrame** yuv_frame, AVPacket** av_packet) {
+    AVFrame** yuv_frame, AVFrame** hw_sw_frame, AVPacket** av_packet,
+    AVBufferRef** hw_device_ctx) {
   if (*av_frame != NULL)  av_frame_free(av_frame);
+  if (*hw_sw_frame != NULL) av_frame_free(hw_sw_frame);
   if (*yuv_frame != NULL) {
     av_freep(&(*yuv_frame)->data[0]);
     av_frame_free(yuv_frame);
@@ -314,6 +388,7 @@ static void close_ffmpeg_decoder(
   if (*sws_ctx != NULL)   { sws_freeContext(*sws_ctx); *sws_ctx = NULL; }
   if (*codec_ctx != NULL) avcodec_free_context(codec_ctx);
   if (*fmt_ctx != NULL)   avformat_close_input(fmt_ctx);
+  if (*hw_device_ctx != NULL) av_buffer_unref(hw_device_ctx);
 }
 
 /* =========================================================================
@@ -326,15 +401,17 @@ int open_shared_ffmpeg(struct shared_decode_ctx* dec, const char* filename) {
   return open_ffmpeg_decoder(
     filename, "Shared decode",
     app->fmt, target_w, target_h,
+    app->use_vaapi_decode, app->vaapi_device,
     &dec->fmt_ctx, &dec->codec_ctx, &dec->sws_ctx,
-    &dec->av_frame, &dec->yuv_frame, &dec->av_packet,
-    &dec->video_stream_idx);
+    &dec->av_frame, &dec->yuv_frame, &dec->hw_sw_frame, &dec->av_packet,
+    &dec->hw_device_ctx, &dec->video_stream_idx);
 }
 
 void close_shared_ffmpeg(struct shared_decode_ctx* dec) {
   close_ffmpeg_decoder(
     &dec->fmt_ctx, &dec->codec_ctx, &dec->sws_ctx,
-    &dec->av_frame, &dec->yuv_frame, &dec->av_packet);
+    &dec->av_frame, &dec->yuv_frame, &dec->hw_sw_frame, &dec->av_packet,
+    &dec->hw_device_ctx);
 }
 
 /* =========================================================================
@@ -348,9 +425,10 @@ static int open_ffmpeg_source(struct st20p_tx_ctx* ctx, const char* filename) {
   int ret = open_ffmpeg_decoder(
     filename, log_prefix,
     ctx->app->fmt, target_w, target_h,
+    ctx->app->use_vaapi_decode, ctx->app->vaapi_device,
     &ctx->fmt_ctx, &ctx->codec_ctx, &ctx->sws_ctx,
-    &ctx->av_frame, &ctx->yuv_frame, &ctx->av_packet,
-    &ctx->video_stream_idx);
+    &ctx->av_frame, &ctx->yuv_frame, &ctx->hw_sw_frame, &ctx->av_packet,
+    &ctx->hw_device_ctx, &ctx->video_stream_idx);
   if (ret == 0) ctx->use_ffmpeg = true;
   return ret;
 }
@@ -359,7 +437,8 @@ void close_ffmpeg_source(struct st20p_tx_ctx* ctx) {
   if (ctx->use_ffmpeg == false) return;
   close_ffmpeg_decoder(
     &ctx->fmt_ctx, &ctx->codec_ctx, &ctx->sws_ctx,
-    &ctx->av_frame, &ctx->yuv_frame, &ctx->av_packet);
+    &ctx->av_frame, &ctx->yuv_frame, &ctx->hw_sw_frame, &ctx->av_packet,
+    &ctx->hw_device_ctx);
 }
 
 /* =========================================================================
@@ -500,9 +579,23 @@ bool ffmpeg_decode_next_frame(struct st20p_tx_ctx* ctx) {
       break;
     }
 
-    int rows = convert_frame_format(ctx->sws_ctx, ctx->av_frame,
+    /* VAAPI hw decode: sws_scale can't read the opaque GPU surface, so
+     * copy it down to a CPU-side NV12 frame first. */
+    AVFrame* decoded_frame = ctx->av_frame;
+    if (ctx->av_frame->format == AV_PIX_FMT_VAAPI) {
+      if (ctx->hw_sw_frame == NULL ||
+          av_hwframe_transfer_data(ctx->hw_sw_frame, ctx->av_frame, 0) < 0) {
+        LOG_ERROR("ST20P TX(%d): av_hwframe_transfer_data failed", ctx->idx);
+        av_frame_unref(ctx->av_frame);
+        continue;
+      }
+      decoded_frame = ctx->hw_sw_frame;
+    }
+
+    int rows = convert_frame_format(ctx->sws_ctx, decoded_frame,
                                     ctx->codec_ctx->height, ctx->yuv_frame);
     av_frame_unref(ctx->av_frame);
+    if (decoded_frame == ctx->hw_sw_frame) av_frame_unref(ctx->hw_sw_frame);
     if (rows <= 0) {
       LOG_ERROR("ST20P TX(%d): convert_frame_format failed (ret=%d)",
                 ctx->idx, rows);

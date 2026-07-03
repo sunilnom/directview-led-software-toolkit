@@ -106,6 +106,29 @@ static int extract_json_int(const char* start, const char* end, const char* key)
     return -1;
 }
 
+/* Extract a JSON boolean value for key within [start, end).
+ * Returns 1 for true, 0 for false, -1 if key not found (caller keeps default). */
+static int extract_json_bool(const char* start, const char* end, const char* key) {
+    char search_key[128];
+    snprintf(search_key, sizeof(search_key), "\"%s\"", key);
+    size_t klen = strlen(search_key);
+
+    const char* pos = start;
+    while (pos < end) {
+        pos = (const char*)memmem(pos, end - pos, search_key, klen);
+        if (pos == NULL) return -1;
+        pos += klen;
+        while (pos < end && (*pos == ' ' || *pos == '\t' || *pos == '\n' || *pos == '\r')) pos++;
+        if (pos >= end || *pos != ':') continue;
+        pos++;
+        while (pos < end && (*pos == ' ' || *pos == '\t' || *pos == '\n' || *pos == '\r')) pos++;
+        if (end - pos >= 4 && memcmp(pos, "true", 4) == 0) return 1;
+        if (end - pos >= 5 && memcmp(pos, "false", 5) == 0) return 0;
+        return -1;
+    }
+    return -1;
+}
+
 /* Find the opening '{' of the object that follows key within [start, end).
  * Returns pointer to '{', or NULL. */
 static const char* find_object(const char* start, const char* end, const char* key) {
@@ -291,6 +314,11 @@ int parse_tx_config(const char* config_file, struct dvledtx_config* config) {
         v = extract_json_int(video_obj, video_end, "width");  if (v > 0) config->width  = v;
         v = extract_json_int(video_obj, video_end, "height"); if (v > 0) config->height = v;
         extract_json_string(video_obj, video_end, "tx_url", config->tx_url, sizeof(config->tx_url));
+
+        v = extract_json_bool(video_obj, video_end, "use_vaapi_decode");
+        if (v >= 0) config->use_vaapi_decode = (v != 0);
+        extract_json_string(video_obj, video_end, "vaapi_device",
+                            config->vaapi_device, sizeof(config->vaapi_device));
     }
 
     /* --- tx_video block (transmission parameters) --- */
@@ -754,6 +782,17 @@ int load_and_apply_config(struct dvledtx_context* app, const char* config_file) 
     if (config.tx_url[0] != '\0') {
         strncpy(app->tx_url, config.tx_url, sizeof(app->tx_url) - 1);
         app->tx_url[sizeof(app->tx_url) - 1] = '\0';
+    }
+
+    /* VAAPI hardware decode (optional; falls back to a default render node
+     * path when enabled but no explicit device is given) */
+    app->use_vaapi_decode = config.use_vaapi_decode;
+    if (config.vaapi_device[0] != '\0') {
+        strncpy(app->vaapi_device, config.vaapi_device, sizeof(app->vaapi_device) - 1);
+        app->vaapi_device[sizeof(app->vaapi_device) - 1] = '\0';
+    } else {
+        strncpy(app->vaapi_device, "/dev/dri/renderD128", sizeof(app->vaapi_device) - 1);
+        app->vaapi_device[sizeof(app->vaapi_device) - 1] = '\0';
     }
 
     /* Copy per-session network + crop into app->session_net[] */

@@ -14,6 +14,7 @@
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/hwcontext.h>
 #include <libswscale/swscale.h>
 
 /* MTL API headers — always included; mtl_tx_init/uninit are always compiled
@@ -45,6 +46,10 @@ struct shared_decode_ctx {
   AVFrame*           yuv_frame;   /* full-width yuv422p10le after sws     */
   AVPacket*          av_packet;
   int                video_stream_idx;
+
+  /* VAAPI hardware decode (NULL when running in software decode mode) */
+  AVBufferRef*       hw_device_ctx;
+  AVFrame*           hw_sw_frame;  /* GPU->CPU transfer target for sws_scale */
 
   pthread_barrier_t  barrier_decoded; /* decode done -> TX threads may copy */
   pthread_barrier_t  barrier_copied;  /* TX done     -> decode may proceed  */
@@ -89,6 +94,10 @@ struct st20p_tx_ctx {
   AVFrame*           yuv_frame;      /* decoded + scaled input frame */
   AVPacket*          av_packet;
   int                video_stream_idx;
+
+  /* VAAPI hardware decode (NULL when running in software decode mode) */
+  AVBufferRef*       hw_device_ctx;
+  AVFrame*           hw_sw_frame;    /* GPU->CPU transfer target for sws_scale */
 
 #ifdef ENABLE_MTL_TX
   /* ── MTL pipeline TX path ────────────────────────────────────────────────
