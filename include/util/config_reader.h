@@ -42,6 +42,9 @@ struct dvledtx_config {
   /* optional log file path (empty = console only) */
   char log_file[256];
 
+  /* enable MTL built-in PTP hardware sync (default: true) */
+  bool ptp_enable;
+
   /* tx_sessions array — dynamically allocated */
   int session_count;
   int session_cap;                             /* allocated capacity */

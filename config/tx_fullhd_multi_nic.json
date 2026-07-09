@@ -1,5 +1,6 @@
 {
   "log_file": "dvledtx.log",
+  "ptp_enable": true,
   "interfaces": [
     {
       "name": "0000:03:10.1",
@@ -35,7 +36,7 @@
   "video": {
     "width":  1920,
     "height": 1080,
-    "tx_url": "/home/intel/workspace/sample/ball_1080p_yuv420p_30fps_15min.mp4"
+    "tx_url": "/home/intel/workspace/roshan/applications.media.ledvideowall.gardencove-next.transmitter-app/balls_15min_yuv420p.mp4"
   },
   "tx_video": {
     "scale_width":  1920,

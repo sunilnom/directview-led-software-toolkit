@@ -61,6 +61,9 @@ struct dvledtx_context {
   bool force_dhcp;
   int test_time_s;
 
+  /* PTP hardware sync — enable MTL built-in PTP (NIC hardware timestamps) */
+  bool ptp_enable;
+
   /* Per-session network + crop config — dynamically allocated, st20p_sessions elements */
   struct tx_session_net* session_net;
 

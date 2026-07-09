@@ -106,6 +106,29 @@ static int extract_json_int(const char* start, const char* end, const char* key)
     return -1;
 }
 
+/* Extract a JSON boolean value for key within [start, end).
+ * Accepts true/false and 1/0. Returns 1 (true), 0 (false), or -1 if not found. */
+static int extract_json_bool(const char* start, const char* end, const char* key) {
+    char search_key[128];
+    snprintf(search_key, sizeof(search_key), "\"%s\"", key);
+    size_t klen = strlen(search_key);
+
+    const char* pos = start;
+    while (pos < end) {
+        pos = (const char*)memmem(pos, end - pos, search_key, klen);
+        if (pos == NULL) return -1;
+        pos += klen;
+        while (pos < end && (*pos == ' ' || *pos == '\t' || *pos == '\n' || *pos == '\r')) pos++;
+        if (pos >= end || *pos != ':') continue;
+        pos++;
+        while (pos < end && (*pos == ' ' || *pos == '\t' || *pos == '\n' || *pos == '\r')) pos++;
+        if (pos < end && (*pos == 't' || *pos == 'T' || *pos == '1')) return 1;
+        if (pos < end && (*pos == 'f' || *pos == 'F' || *pos == '0')) return 0;
+        return -1;
+    }
+    return -1;
+}
+
 /* Find the opening '{' of the object that follows key within [start, end).
  * Returns pointer to '{', or NULL. */
 static const char* find_object(const char* start, const char* end, const char* key) {
@@ -231,6 +254,14 @@ int parse_tx_config(const char* config_file, struct dvledtx_config* config) {
 
     const char* buf_end = json + nread;
     memset(config, 0, sizeof(*config));
+
+    /* PTP hardware sync is mandatory by default; an explicit
+     * "ptp_enable": false in the config can disable it. */
+    config->ptp_enable = true;
+    {
+        int p = extract_json_bool(json, buf_end, "ptp_enable");
+        if (p >= 0) config->ptp_enable = (p != 0);
+    }
 
     /* --- interfaces[] — parse all entries, growing arrays as needed --- */
     const char* ifaces_arr = find_array(json, buf_end, "interfaces");
@@ -777,6 +808,9 @@ int load_and_apply_config(struct dvledtx_context* app, const char* config_file) 
         strncpy(app->log_file, config.log_file, sizeof(app->log_file) - 1);
         app->log_file[sizeof(app->log_file) - 1] = '\0';
     }
+
+    /* PTP hardware sync */
+    app->ptp_enable = config.ptp_enable;
 
     LOG_INFO("Config loaded: %s (%d NIC(s), %d session(s))",
              config_file, config.nic_count, config.session_count);

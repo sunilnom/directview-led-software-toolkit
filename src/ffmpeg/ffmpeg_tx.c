@@ -99,6 +99,33 @@ int open_ffmpeg_tx(struct st20p_tx_ctx* ctx) {
   ret = av_opt_set_int(ctx->out_fmt_ctx->priv_data, "payload_type", (int64_t)payload_type,  0);
   if (ret < 0) LOG_WARN("ST20P TX(%d): av_opt_set_int payload_type failed (ret=%d)", ctx->idx, ret);
 
+  /* The mtl_st20p muxer defaults to requesting 16 tx/16 rx queues from the
+   * NIC, which exceeds what small NICs (e.g. Intel I225) actually support
+   * and crashes the DPDK PMD during queue setup.  Size the request to the
+   * number of sessions actually sharing this NIC instead — mirrors the
+   * formula used by the direct MTL pipeline path (mtl_tx.c). */
+  int sessions_on_nic = 0;
+  for (int i = 0; i < ctx->app->st20p_sessions; i++) {
+    if (ctx->app->session_net[i].nic_index == nic) sessions_on_nic++;
+  }
+  int64_t tx_queues = sessions_on_nic + 2;
+  int64_t rx_queues = 1;
+  ret = av_opt_set_int(ctx->out_fmt_ctx->priv_data, "tx_queues", tx_queues, 0);
+  if (ret < 0) LOG_WARN("ST20P TX(%d): av_opt_set_int tx_queues failed (ret=%d)", ctx->idx, ret);
+  ret = av_opt_set_int(ctx->out_fmt_ctx->priv_data, "rx_queues", rx_queues, 0);
+  if (ret < 0) LOG_WARN("ST20P TX(%d): av_opt_set_int rx_queues failed (ret=%d)", ctx->idx, ret);
+
+  /* PTP hardware sync: enable MTL built-in PTP so the mtl_st20p muxer paces
+   * transmission against the NIC hardware clock (PHC) instead of TSC/system
+   * time.  Requires a PTP grandmaster reachable on the NIC network. */
+  if (ctx->app->ptp_enable) {
+    ret = av_opt_set_int(ctx->out_fmt_ctx->priv_data, "ptp_enable", 1, 0);
+    if (ret < 0)
+      LOG_WARN("ST20P TX(%d): av_opt_set_int ptp_enable failed (ret=%d)", ctx->idx, ret);
+    else
+      LOG_INFO("ST20P TX(%d): MTL built-in PTP hardware sync enabled", ctx->idx);
+  }
+
   /* Multi-NIC: The FFmpeg mtl_st20p plugin's mtl_dev_get() uses a singleton
    * shared MTL handle — the FIRST avformat_write_header() call creates the
    * MTL instance via mtl_init(), which initialises DPDK EAL.  EAL cannot be

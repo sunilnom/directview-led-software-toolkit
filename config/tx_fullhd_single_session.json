@@ -10,13 +10,13 @@
   "video": {
     "width":  3840,
     "height": 2160,
-    "tx_url": "bbb_sunflower_1080p_30fps_normal.mp4"
+    "tx_url": "/home/intel/workspace/roshan/applications.media.ledvideowall.gardencove-next.transmitter-app/scripts/testVidoes/ball_gbrp10le_60fps_15min.mp4",
   },
   "tx_video": {
     "scale_width":  3840,
     "scale_height": 2160,
     "fps":    30,
-    "fmt":    "yuv422p10le"
+    "fmt":    "gbrp10le"
   },
   "tx_sessions": [
     {
