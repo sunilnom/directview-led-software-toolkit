@@ -203,6 +203,16 @@ int mtl_tx_init(session_manager_t* manager, struct dvledtx_context* app) {
   memset(&mtl_params, 0, sizeof(mtl_params));
 
   mtl_params.flags     = MTL_FLAG_BIND_NUMA | MTL_FLAG_DEV_AUTO_START_STOP;
+
+  /* PTP hardware sync: enable MTL's built-in PTP so the direct MTL pipeline
+   * paces transmission against the NIC hardware clock (PHC) instead of TSC.
+   * Requires a PTP grandmaster reachable on the NIC network. Mirrors the
+   * ptp_enable handling in the FFmpeg avdevice path (src/ffmpeg/ffmpeg_tx.c). */
+  if (app->ptp_enable) {
+    mtl_params.flags |= MTL_FLAG_PTP_ENABLE;
+    LOG_INFO("MTL init: built-in PTP hardware sync enabled");
+  }
+
   mtl_params.num_ports = app->nic_count;
 
   /* Count sessions assigned to each NIC for queue allocation */

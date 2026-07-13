@@ -119,9 +119,9 @@ int open_ffmpeg_tx(struct st20p_tx_ctx* ctx) {
    * transmission against the NIC hardware clock (PHC) instead of TSC/system
    * time.  Requires a PTP grandmaster reachable on the NIC network. */
   if (ctx->app->ptp_enable) {
-    ret = av_opt_set_int(ctx->out_fmt_ctx->priv_data, "ptp_enable", 1, 0);
+    ret = av_opt_set_int(ctx->out_fmt_ctx->priv_data, "ptp", 1, 0);
     if (ret < 0)
-      LOG_WARN("ST20P TX(%d): av_opt_set_int ptp_enable failed (ret=%d)", ctx->idx, ret);
+      LOG_WARN("ST20P TX(%d): av_opt_set_int ptp failed (ret=%d)", ctx->idx, ret);
     else
       LOG_INFO("ST20P TX(%d): MTL built-in PTP hardware sync enabled", ctx->idx);
   }
