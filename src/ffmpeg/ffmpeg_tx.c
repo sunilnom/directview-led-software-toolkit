@@ -24,6 +24,7 @@
 #include "ffmpeg/ffmpeg_tx.h"
 #include "ffmpeg/ffmpeg_frame_handler.h"
 #include "core/session_manager.h"
+#include "mtl/mtl_tx.h"
 #include "app_context.h"
 #include "util/logger.h"
 #include <stdio.h>
@@ -117,8 +118,15 @@ int open_ffmpeg_tx(struct st20p_tx_ctx* ctx) {
 
   /* PTP hardware sync: enable MTL built-in PTP so the mtl_st20p muxer paces
    * transmission against the NIC hardware clock (PHC) instead of TSC/system
-   * time.  Requires a PTP grandmaster reachable on the NIC network. */
-  if (ctx->app->ptp_enable) {
+   * time.  Requires a PTP grandmaster reachable on the NIC network.
+   *
+   * Capability guard: MTL enables NIC hardware timesync when "ptp" is set,
+   * which crashes inside some DPDK PMDs (notably Intel igc / I225-I226). Skip
+   * PTP for unsupported NICs and fall back to software timestamps instead. */
+  if (ctx->app->ptp_enable && !mtl_tx_nic_hw_ptp_supported(ctx->app->nics[nic].port)) {
+    LOG_WARN("ST20P TX(%d): NIC %s does not support hardware PTP — using "
+             "software (system-clock) timestamps", ctx->idx, ctx->app->nics[nic].port);
+  } else if (ctx->app->ptp_enable) {
     ret = av_opt_set_int(ctx->out_fmt_ctx->priv_data, "ptp", 1, 0);
     if (ret < 0)
       LOG_WARN("ST20P TX(%d): av_opt_set_int ptp failed (ret=%d)", ctx->idx, ret);

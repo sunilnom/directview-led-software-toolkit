@@ -46,6 +46,23 @@ int  mtl_tx_init(session_manager_t* manager, struct dvledtx_context* app);
  */
 void mtl_tx_uninit(session_manager_t* manager);
 
+/*
+ * mtl_tx_log_ptp_status() — report the active timing mode for the direct MTL
+ *   path.  When PTP is enabled it waits briefly for the built-in PTP client to
+ *   lock onto a grandmaster and logs whether hardware PTP or the software
+ *   (system-clock) fallback is in effect.  Must be called after the MTL device
+ *   has started (i.e. after the first TX session is created).
+ */
+void mtl_tx_log_ptp_status(struct dvledtx_context* app);
+
+/*
+ * mtl_tx_nic_hw_ptp_supported() — return true if the NIC at PCI BDF "bdf" can
+ *   safely enable MTL hardware PTP.  Known-broken parts (Intel igc / I225-I226,
+ *   whose DPDK PMD crashes in eth_*_timesync_enable()) return false so callers
+ *   can downgrade to software timestamps before mtl_init() is reached.
+ */
+bool mtl_tx_nic_hw_ptp_supported(const char* bdf);
+
 #ifdef ENABLE_MTL_TX
 
 /* -------------------------------------------------------------------------

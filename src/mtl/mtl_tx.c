@@ -32,7 +32,11 @@
 #include "util/logger.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <unistd.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <time.h>
 
 #ifdef ENABLE_MTL_TX
 #include <libavutil/pixdesc.h>
@@ -188,6 +192,129 @@ void mtl_copy_crop_to_frame(struct st_frame* dst, const AVFrame* src,
 #endif /* ENABLE_MTL_TX — mtl_copy_crop_to_frame and format helpers */
 
 /* =========================================================================
+ * PTP lock auto-detection and software-timestamp fallback
+ * =========================================================================
+ *
+ * When built-in PTP is enabled, MTL runs its PTP client but does not, by
+ * itself, switch the application to a software time source if no grandmaster
+ * is present.  These helpers implement explicit auto-detect/fallback instead
+ * of relying on MTL's implicit behaviour:
+ *
+ *   dvledtx_ptp_sync_notify() — registered as mtl_init_params.ptp_sync_notify.
+ *     MTL calls it on every valid PTP DELAY_RESP from the grandmaster, so we
+ *     use it to know PTP is (still) locked and record the last sync instant.
+ *
+ *   dvledtx_ptp_time_fn() — registered as mtl_init_params.ptp_get_time_fn and
+ *     becomes MTL's time source.  It returns the hardware-disciplined PTP time
+ *     while PTP is locked and automatically falls back to the system clock
+ *     (software timestamp) if PTP never locks or stops syncing.
+ *
+ * This only applies to the direct MTL path: mtl_tx_init() owns mtl_init(),
+ * whereas the FFmpeg mtl_st20p muxer creates its own MTL handle and thus keeps
+ * MTL's implicit timing behaviour. */
+
+#define DVLEDTX_NS_PER_SEC          1000000000ULL
+/* Treat PTP as "locked" only if a sync arrived within this window. */
+#define DVLEDTX_PTP_LOSS_TIMEOUT_NS (3ULL * DVLEDTX_NS_PER_SEC)
+/* How long mtl_tx_log_ptp_status() waits for the first lock before reporting. */
+#define DVLEDTX_PTP_LOCK_WAIT_MS    3000
+#define DVLEDTX_PTP_POLL_MS         100
+
+struct dvledtx_ptp_state {
+  _Atomic unsigned long sync_count;     /* total PTP syncs received */
+  _Atomic uint64_t      last_sync_mono; /* CLOCK_MONOTONIC ns of last sync */
+  _Atomic int64_t       last_delta;     /* last reported phc delta (ns) */
+  mtl_handle            mtl;            /* handle for mtl_ptp_read_time() */
+};
+
+static struct dvledtx_ptp_state g_ptp_state;
+
+static uint64_t dvledtx_mono_ns(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * DVLEDTX_NS_PER_SEC + (uint64_t)ts.tv_nsec;
+}
+
+static uint64_t dvledtx_realtime_ns(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  return (uint64_t)ts.tv_sec * DVLEDTX_NS_PER_SEC + (uint64_t)ts.tv_nsec;
+}
+
+static bool dvledtx_ptp_is_locked(void) {
+  if (atomic_load(&g_ptp_state.sync_count) == 0) return false;
+  uint64_t last = atomic_load(&g_ptp_state.last_sync_mono);
+  return (dvledtx_mono_ns() - last) < DVLEDTX_PTP_LOSS_TIMEOUT_NS;
+}
+
+static void dvledtx_ptp_sync_notify(void* priv, struct mtl_ptp_sync_notify_meta* meta) {
+  (void)priv;
+  if (meta == NULL) return;
+  unsigned long prev = atomic_fetch_add(&g_ptp_state.sync_count, 1);
+  atomic_store(&g_ptp_state.last_sync_mono, dvledtx_mono_ns());
+  atomic_store(&g_ptp_state.last_delta, meta->delta);
+  if (prev == 0)
+    LOG_INFO("PTP: grandmaster detected (delta %ld ns) — using hardware PTP timestamps",
+             (long)meta->delta);
+}
+
+/* MTL time source: hardware PTP while locked, system clock otherwise. */
+static uint64_t dvledtx_ptp_time_fn(void* priv) {
+  (void)priv;
+  if (dvledtx_ptp_is_locked() && g_ptp_state.mtl != NULL)
+    return mtl_ptp_read_time(g_ptp_state.mtl);
+  return dvledtx_realtime_ns();
+}
+
+/* Intel Foxville (igc) device IDs — I225/I226 family. The DPDK e1000 PMD's
+ * eth_igc_timesync_enable() segfaults on these parts, so MTL hardware PTP
+ * (MTL_FLAG_PTP_ENABLE) cannot be used and we must fall back to software
+ * timestamps BEFORE mtl_init() is called (the crash happens inside it). */
+static const uint16_t k_igc_no_hw_ptp_ids[] = {
+  0x15F2, /* I225-LM */        0x15F3, /* I225-V */   0x15F8, /* I225-I */
+  0x15FD, /* I225 blank NVM */ 0x0D9F, /* I225-IT */
+  0x3100, /* I225-K */         0x3101, /* I225-K2 */
+  0x5502, /* I225-LMVP */      0x5504, /* I226-K */
+  0x125B, /* I226-LM */        0x125C, /* I226-V */   0x125D, /* I226-IT */
+  0x125E, /* I221-V */         0x125F, /* I226 blank NVM */
+};
+
+/* Read a hex integer from a PCI sysfs attribute (e.g. "device", "vendor"). */
+static long dvledtx_read_pci_hex(const char* bdf, const char* attr) {
+  char path[256];
+  snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/%s", bdf, attr);
+  FILE* f = fopen(path, "re");
+  if (f == NULL) return -1;
+  long val = -1;
+  if (fscanf(f, "%li", &val) != 1) val = -1; /* flawfinder: ignore */
+  fclose(f);
+  return val;
+}
+
+/* Return true if the NIC at this PCI BDF can safely enable MTL hardware PTP.
+ * Known-broken parts (Intel igc/I225/I226) return false so the caller can
+ * transparently downgrade to software timestamps instead of crashing. */
+bool mtl_tx_nic_hw_ptp_supported(const char* bdf) {
+  long vendor = dvledtx_read_pci_hex(bdf, "vendor");
+  long device = dvledtx_read_pci_hex(bdf, "device");
+  if (vendor < 0 || device < 0) {
+    /* BDF of a DPDK-bound device is normally readable; if not, don't block. */
+    LOG_WARN("PTP: cannot read PCI id for %s — proceeding with hardware PTP", bdf);
+    return true;
+  }
+  if (vendor == 0x8086) {
+    for (size_t i = 0; i < sizeof(k_igc_no_hw_ptp_ids) / sizeof(k_igc_no_hw_ptp_ids[0]); i++) {
+      if ((uint16_t)device == k_igc_no_hw_ptp_ids[i]) {
+        LOG_WARN("PTP: NIC %s (Intel igc 0x%04lx) DPDK PMD lacks working hardware "
+                 "timesync — will use software (system-clock) timestamps", bdf, device);
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+/* =========================================================================
  * mtl_tx_init / mtl_tx_uninit — compiled unconditionally (FFmpeg + direct)
  * =========================================================================
  *
@@ -204,13 +331,39 @@ int mtl_tx_init(session_manager_t* manager, struct dvledtx_context* app) {
 
   mtl_params.flags     = MTL_FLAG_BIND_NUMA | MTL_FLAG_DEV_AUTO_START_STOP;
 
+  /* Hardware PTP capability guard: MTL_FLAG_PTP_ENABLE makes mtl_init() enable
+   * NIC hardware timesync. Some DPDK PMDs (notably Intel igc / I225-I226) crash
+   * in eth_*_timesync_enable() during that step, so detect unsupported NICs up
+   * front and downgrade to software timestamps instead of segfaulting. The MTL
+   * instance shares one global PTP setting, so a single unsupported port forces
+   * software mode for all ports. */
+  if (app->ptp_enable) {
+    for (int ni = 0; ni < app->nic_count; ni++) {
+      if (!mtl_tx_nic_hw_ptp_supported(app->nics[ni].port)) {
+        app->ptp_enable = false;
+        break;
+      }
+    }
+    if (!app->ptp_enable)
+      LOG_WARN("PTP: hardware PTP disabled (unsupported NIC present) — running "
+               "in software (system-clock) timestamp mode");
+  }
+
   /* PTP hardware sync: enable MTL's built-in PTP so the direct MTL pipeline
    * paces transmission against the NIC hardware clock (PHC) instead of TSC.
-   * Requires a PTP grandmaster reachable on the NIC network. Mirrors the
+   * A custom time source (dvledtx_ptp_time_fn) is registered so the pipeline
+   * auto-detects whether a grandmaster is present and transparently falls back
+   * to software (system-clock) timestamps when PTP is not locked. Mirrors the
    * ptp_enable handling in the FFmpeg avdevice path (src/ffmpeg/ffmpeg_tx.c). */
   if (app->ptp_enable) {
     mtl_params.flags |= MTL_FLAG_PTP_ENABLE;
-    LOG_INFO("MTL init: built-in PTP hardware sync enabled");
+    atomic_store(&g_ptp_state.sync_count, 0UL);
+    atomic_store(&g_ptp_state.last_sync_mono, 0ULL);
+    atomic_store(&g_ptp_state.last_delta, (int64_t)0);
+    g_ptp_state.mtl = NULL;
+    mtl_params.ptp_sync_notify = dvledtx_ptp_sync_notify;
+    mtl_params.ptp_get_time_fn = dvledtx_ptp_time_fn;
+    LOG_INFO("MTL init: built-in PTP enabled with auto-detect and software fallback");
   }
 
   mtl_params.num_ports = app->nic_count;
@@ -248,6 +401,10 @@ int mtl_tx_init(session_manager_t* manager, struct dvledtx_context* app) {
     LOG_ERROR("Failed to initialise MTL library");
     return -1;
   }
+  /* Publish the handle for the adaptive PTP time source (used only when PTP
+   * is enabled; harmless otherwise). Safe to set here because no session
+   * transmits — and thus ptp_get_time_fn is not called — until later. */
+  g_ptp_state.mtl = manager->mtl;
   LOG_INFO("MTL library initialised successfully (%d port(s))", app->nic_count);
   return 0;
 }
@@ -257,6 +414,36 @@ void mtl_tx_uninit(session_manager_t* manager) {
     mtl_uninit(manager->mtl);
     manager->mtl = NULL;
   }
+  g_ptp_state.mtl = NULL;
+}
+
+/* =========================================================================
+ * mtl_tx_log_ptp_status
+ * =========================================================================
+ *
+ * Report the active timing mode for the direct MTL path. Called after the MTL
+ * device has started (first session created) so the built-in PTP client has
+ * begun exchanging messages. Waits up to DVLEDTX_PTP_LOCK_WAIT_MS for a lock,
+ * then logs whether hardware PTP or the software fallback is in effect.
+ */
+void mtl_tx_log_ptp_status(struct dvledtx_context* app) {
+  if (!app->ptp_enable) {
+    LOG_INFO("PTP: disabled by config — using software (system-clock) timestamps");
+    return;
+  }
+
+  int waited = 0;
+  while (waited < DVLEDTX_PTP_LOCK_WAIT_MS && !dvledtx_ptp_is_locked()) {
+    usleep((useconds_t)DVLEDTX_PTP_POLL_MS * 1000);
+    waited += DVLEDTX_PTP_POLL_MS;
+  }
+
+  if (dvledtx_ptp_is_locked())
+    LOG_INFO("PTP: locked to grandmaster (delta %ld ns) — hardware timestamp mode active",
+             (long)atomic_load(&g_ptp_state.last_delta));
+  else
+    LOG_WARN("PTP: no grandmaster found within %d ms — running in software "
+             "(system-clock) timestamp mode", DVLEDTX_PTP_LOCK_WAIT_MS);
 }
 
 /* =========================================================================

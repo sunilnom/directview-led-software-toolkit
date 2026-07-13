@@ -333,6 +333,13 @@ int session_manager_init(session_manager_t* manager, struct dvledtx_context* app
     }
   }
 
+#ifdef ENABLE_MTL_TX
+  /* The MTL device auto-starts when the first session is created above, so the
+   * built-in PTP client is now running. Report the active timing mode (hardware
+   * PTP vs. software fallback). */
+  mtl_tx_log_ptp_status(app);
+#endif /* ENABLE_MTL_TX */
+
   LOG_INFO("TX Session Manager: %d video sessions, shared_dec=%s",
            manager->st20p_count,
            manager->shared_dec != NULL ? "YES" : "NO");
